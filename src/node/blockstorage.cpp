@@ -25,6 +25,7 @@
 #include <util/fs.h>
 #include <util/signalinterrupt.h>
 #include <util/strencodings.h>
+#include <util/time.h>
 #include <util/translation.h>
 #include <validation.h>
 
@@ -103,6 +104,7 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
 
     // Count total entries first for progress calculation
     // This is a quick count-only pass
+    const auto count_start{SteadyClock::now()};
     int nTotal = 0;
     {
         std::unique_ptr<CDBIterator> pcounter(NewIterator());
@@ -117,9 +119,12 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
             }
         }
     }
+    LogPrintf("Startup timing: block index count pass: %d entries in %d ms\n",
+              nTotal, Ticks<std::chrono::milliseconds>(SteadyClock::now() - count_start));
 
     int nCount = 0;
     int nLastPercent = -1;
+    const auto deserialize_start{SteadyClock::now()};
 
     // Load m_block_index
     while (pcursor->Valid()) {
@@ -252,6 +257,8 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
         }
     }
 
+    LogPrintf("Startup timing: block index deserialize pass: %d entries in %d ms\n",
+              nCount, Ticks<std::chrono::milliseconds>(SteadyClock::now() - deserialize_start));
     return true;
 }
 } // namespace kernel
@@ -540,12 +547,20 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
     Assert(m_snapshot_height.has_value() == snapshot_blockhash.has_value());
 
     // Calculate nChainWork
+    const auto collect_start{SteadyClock::now()};
     LogPrintf("LoadBlockIndex: Getting all block indices...");
     std::vector<CBlockIndex*> vSortedByHeight{GetAllBlockIndices()};
+    LogPrintf("Startup timing: first block-index vector: %d entries in %d ms\n",
+              vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - collect_start));
+
+    const auto sort_start{SteadyClock::now()};
     LogPrintf("LoadBlockIndex: Sorting %d block indices by height...", vSortedByHeight.size());
     std::sort(vSortedByHeight.begin(), vSortedByHeight.end(),
               CBlockIndexHeightOnlyComparator());
+    LogPrintf("Startup timing: first block-index height sort: %d entries in %d ms\n",
+              vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - sort_start));
     LogPrintf("LoadBlockIndex: Sort complete, processing blocks...");
+    const auto process_start{SteadyClock::now()};
 
     CBlockIndex* previous_index{nullptr};
     int nProcessed = 0;
@@ -608,6 +623,8 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
         }
     }
 
+    LogPrintf("Startup timing: block-index reconstruction pass: %d entries in %d ms\n",
+              nProcessed, Ticks<std::chrono::milliseconds>(SteadyClock::now() - process_start));
     return true;
 }
 
