@@ -2225,6 +2225,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // metrics feed consensus DCA/ERR. A truncated/partially-restored block file
     // passes the index-flag startup guard but must never let the node run
     // DigiDollar validation on partial data.
+    const auto oracle_prices_start{SteadyClock::now()};
     if (!OracleBundleManager::LoadPricesFromChain(chainman)) {
         return InitError(_("DigiDollar-era block data is incomplete or unreadable. "
                            "Restart with -reindex to rebuild it (a pruned node will "
@@ -2234,6 +2235,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // (total DD supply + collateral) from the on-chain UTXO set so consensus
     // DCA/ERR health does not depend on process restart history. No-op until
     // DigiDollar is active at the tip.
+    const auto system_health_start{SteadyClock::now()};
     if (!DigiDollar::SystemHealthMonitor::ReconstructFromChain(chainman)) {
         return InitError(_("DigiDollar-era block data is incomplete or unreadable. "
                            "Restart with -reindex to rebuild it (a pruned node will "
