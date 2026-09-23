@@ -2231,6 +2231,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                            "Restart with -reindex to rebuild it (a pruned node will "
                            "redownload and re-prune)."));
     }
+    LogPrintf("Startup timing: oracle price history reconstruction: %d ms\n",
+              Ticks<std::chrono::milliseconds>(SteadyClock::now() - oracle_prices_start));
     // DD-FINAL-003 / AR-CONSENSUS-1: reconstruct cached system-health metrics
     // (total DD supply + collateral) from the on-chain UTXO set so consensus
     // DCA/ERR health does not depend on process restart history. No-op until
@@ -2241,6 +2243,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                            "Restart with -reindex to rebuild it (a pruned node will "
                            "redownload and re-prune)."));
     }
+
+    LogPrintf("Startup timing: system health reconstruction: %d ms\n",
+              Ticks<std::chrono::milliseconds>(SteadyClock::now() - system_health_start));
 
     // DD-FINAL-005 / AR-0: OP_CHECKPRICE is deterministically DISABLED (it now
     // consumes its witness operand and always pushes vchFalse). The interpreter no
