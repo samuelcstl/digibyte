@@ -5595,10 +5595,18 @@ bool ChainstateManager::LoadBlockIndex()
 
         m_blockman.ScanAndUnlinkAlreadyPrunedFiles();
 
+        const auto collect_start{SteadyClock::now()};
         std::vector<CBlockIndex*> vSortedByHeight{m_blockman.GetAllBlockIndices()};
+        LogPrintf("Startup timing: second block-index vector: %d entries in %d ms\n",
+                  vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - collect_start));
+
+        const auto sort_start{SteadyClock::now()};
         std::sort(vSortedByHeight.begin(), vSortedByHeight.end(),
                   CBlockIndexHeightOnlyComparator());
+        LogPrintf("Startup timing: second block-index height sort: %d entries in %d ms\n",
+                  vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - sort_start));
 
+        const auto candidates_start{SteadyClock::now()};
         for (CBlockIndex* pindex : vSortedByHeight) {
             if (m_interrupt) return false;
             // If we have an assumeutxo-based chainstate, then the snapshot
@@ -5620,6 +5628,8 @@ bool ChainstateManager::LoadBlockIndex()
             if (pindex->IsValid(BLOCK_VALID_TREE) && (m_best_header == nullptr || CBlockIndexWorkComparator()(m_best_header, pindex)))
                 m_best_header = pindex;
         }
+        LogPrintf("Startup timing: block-index candidate/header pass: %d entries in %d ms\n",
+                  vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - candidates_start));
 
         needs_init = m_blockman.m_block_index.empty();
     }
