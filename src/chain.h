@@ -402,6 +402,11 @@ class CDiskBlockIndex : public CBlockIndex
      * SerParams can be used if the field requires any meaning in the future.
      **/
     static constexpr int DUMMY_VERSION = 259900;
+    // Block-index records at or above this format version include cached
+    // cumulative chain work after the block header fields.
+    static constexpr int CHAINWORK_VERSION = 260000;
+
+    bool m_has_persisted_chainwork{false};
 
 public:
     uint256 hashPrev;
@@ -411,16 +416,19 @@ public:
         hashPrev = uint256();
     }
 
-    explicit CDiskBlockIndex(const CBlockIndex* pindex) : CBlockIndex(*pindex)
+    explicit CDiskBlockIndex(const CBlockIndex* pindex) : CBlockIndex(*pindex), m_has_persisted_chainwork{true}
     {
         hashPrev = (pprev ? pprev->GetBlockHash() : uint256());
     }
 
+    bool HasPersistedChainWork() const { return m_has_persisted_chainwork; }
+
     SERIALIZE_METHODS(CDiskBlockIndex, obj)
     {
         LOCK(::cs_main);
-        int _nVersion = DUMMY_VERSION;
+        int _nVersion = CHAINWORK_VERSION;
         READWRITE(VARINT_MODE(_nVersion, VarIntMode::NONNEGATIVE_SIGNED));
+        SER_READ(obj, obj.m_has_persisted_chainwork = _nVersion >= CHAINWORK_VERSION);
 
         READWRITE(VARINT_MODE(obj.nHeight, VarIntMode::NONNEGATIVE_SIGNED));
         READWRITE(VARINT(obj.nStatus));
@@ -436,6 +444,12 @@ public:
         READWRITE(obj.nTime);
         READWRITE(obj.nBits);
         READWRITE(obj.nNonce);
+
+        // nChainWork is expensive to reconstruct on DigiByte after DigiSpeed.
+        // Old records simply end after nNonce and are migrated lazily at startup.
+        if (_nVersion >= CHAINWORK_VERSION) {
+            READWRITE(obj.nChainWork);
+        }
     }
 
     uint256 ConstructBlockHash() const
