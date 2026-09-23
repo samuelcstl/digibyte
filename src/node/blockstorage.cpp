@@ -81,6 +81,15 @@ bool BlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockFi
     return WriteBatch(batch, true);
 }
 
+bool BlockTreeDB::WriteBlockIndexBatch(const std::vector<const CBlockIndex*>& blockinfo, bool sync)
+{
+    CDBBatch batch(*this);
+    for (const CBlockIndex* bi : blockinfo) {
+        batch.Write(std::make_pair(DB_BLOCK_INDEX, bi->GetBlockHash()), CDiskBlockIndex{bi});
+    }
+    return WriteBatch(batch, sync);
+}
+
 bool BlockTreeDB::WriteFlag(const std::string& name, bool fValue)
 {
     return Write(std::make_pair(DB_FLAG, name), fValue ? uint8_t{'1'} : uint8_t{'0'});
@@ -123,6 +132,7 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
               nTotal, Ticks<std::chrono::milliseconds>(SteadyClock::now() - count_start));
 
     int nCount = 0;
+    int nChainWorkCached = 0;
     int nLastPercent = -1;
     const auto deserialize_start{SteadyClock::now()};
 
@@ -157,6 +167,10 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                 pindexNew->nNonce         = diskindex.nNonce;
                 pindexNew->nStatus        = diskindex.nStatus;
                 pindexNew->nTx            = diskindex.nTx;
+                if (diskindex.HasPersistedChainWork()) {
+                    pindexNew->nChainWork = diskindex.nChainWork;
+                    ++nChainWorkCached;
+                }
 
                 // Only apply PoW optimization for mainnet
                 // Check if this is mainnet by comparing genesis block hash
@@ -259,6 +273,8 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
 
     LogPrintf("Startup timing: block index deserialize pass: %d entries in %d ms\n",
               nCount, Ticks<std::chrono::milliseconds>(SteadyClock::now() - deserialize_start));
+    LogPrintf("LoadBlockIndex: loaded cached chain work for %d of %d block-index records\n",
+              nChainWorkCached, nCount);
     return true;
 }
 } // namespace kernel
@@ -567,6 +583,13 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
     SteadyClock::duration reconstruction_chainwork_time{};
     SteadyClock::duration reconstruction_timemax_time{};
     SteadyClock::duration reconstruction_linkage_time{};
+    SteadyClock::duration chainwork_cache_write_time{};
+    static constexpr size_t CHAINWORK_CACHE_MIGRATION_BATCH_SIZE{100000};
+    std::vector<const CBlockIndex*> chainwork_cache_migration;
+    chainwork_cache_migration.reserve(CHAINWORK_CACHE_MIGRATION_BATCH_SIZE);
+    size_t chainwork_cache_hits{0};
+    size_t chainwork_cache_misses{0};
+    size_t chainwork_cache_migrated{0};
     int nProcessed = 0;
     int nLastPercent = -1;
     int nTotal = vSortedByHeight.size();
@@ -597,7 +620,13 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
             }
         }
         const auto algo_end{SteadyClock::now()};
-        pindex->nChainWork = (pindex->pprev ? pindex->pprev->nChainWork : 0) + GetBlockProof(*pindex);
+        if (pindex->nChainWork != 0) {
+            ++chainwork_cache_hits;
+        } else {
+            pindex->nChainWork = (pindex->pprev ? pindex->pprev->nChainWork : 0) + GetBlockProof(*pindex);
+            ++chainwork_cache_misses;
+            chainwork_cache_migration.push_back(pindex);
+        }
         const auto chainwork_end{SteadyClock::now()};
         pindex->nTimeMax = (pindex->pprev ? std::max(pindex->pprev->nTimeMax, pindex->nTime) : pindex->nTime);
         const auto timemax_end{SteadyClock::now()};
@@ -635,8 +664,32 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
             pindex->BuildSkip();
         }
         reconstruction_linkage_time += SteadyClock::now() - linkage_start;
+
+        if (chainwork_cache_migration.size() >= CHAINWORK_CACHE_MIGRATION_BATCH_SIZE) {
+            const auto cache_write_start{SteadyClock::now()};
+            if (!m_block_tree_db->WriteBlockIndexBatch(chainwork_cache_migration, true)) {
+                return error("%s: failed to persist reconstructed chain-work cache", __func__);
+            }
+            chainwork_cache_write_time += SteadyClock::now() - cache_write_start;
+            chainwork_cache_migrated += chainwork_cache_migration.size();
+            chainwork_cache_migration.clear();
+        }
     }
 
+    if (!chainwork_cache_migration.empty()) {
+        const auto cache_write_start{SteadyClock::now()};
+        if (!m_block_tree_db->WriteBlockIndexBatch(chainwork_cache_migration, true)) {
+            return error("%s: failed to persist reconstructed chain-work cache", __func__);
+        }
+        chainwork_cache_write_time += SteadyClock::now() - cache_write_start;
+        chainwork_cache_migrated += chainwork_cache_migration.size();
+    }
+
+    LogPrintf("Startup timing: chain-work cache: hits=%d misses=%d migrated=%d write=%d ms\n",
+              chainwork_cache_hits,
+              chainwork_cache_misses,
+              chainwork_cache_migrated,
+              Ticks<std::chrono::milliseconds>(chainwork_cache_write_time));
     LogPrintf("Startup timing: block-index reconstruction detail: algo=%d ms chainwork=%d ms timemax=%d ms linkage=%d ms\n",
               Ticks<std::chrono::milliseconds>(reconstruction_algo_time),
               Ticks<std::chrono::milliseconds>(reconstruction_chainwork_time),
