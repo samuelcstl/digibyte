@@ -51,6 +51,7 @@ class BlockTreeDB : public CDBWrapper
 public:
     using CDBWrapper::CDBWrapper;
     bool WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo);
+    bool WriteBlockIndexBatch(const std::vector<const CBlockIndex*>& blockinfo, bool sync);
     bool ReadBlockFileInfo(int nFile, CBlockFileInfo& info);
     bool ReadLastBlockFile(int& nFile);
     bool WriteReindexing(bool fReindexing);
