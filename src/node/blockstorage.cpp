@@ -563,6 +563,10 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
     const auto process_start{SteadyClock::now()};
 
     CBlockIndex* previous_index{nullptr};
+    SteadyClock::duration reconstruction_algo_time{};
+    SteadyClock::duration reconstruction_chainwork_time{};
+    SteadyClock::duration reconstruction_timemax_time{};
+    SteadyClock::duration reconstruction_linkage_time{};
     int nProcessed = 0;
     int nLastPercent = -1;
     int nTotal = vSortedByHeight.size();
@@ -581,6 +585,7 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
             return error("%s: block index is non-contiguous, index of height %d missing", __func__, previous_index->nHeight + 1);
         }
         previous_index = pindex;
+        const auto algo_start{SteadyClock::now()};
         // Use memcpy to copy the entire array at once.
         if (pindex->pprev) {
             memcpy(pindex->lastAlgoBlocks, pindex->pprev->lastAlgoBlocks, sizeof(pindex->lastAlgoBlocks));
@@ -591,8 +596,16 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
                 pindex->lastAlgoBlocks[algo] = pindex;
             }
         }
+        const auto algo_end{SteadyClock::now()};
         pindex->nChainWork = (pindex->pprev ? pindex->pprev->nChainWork : 0) + GetBlockProof(*pindex);
+        const auto chainwork_end{SteadyClock::now()};
         pindex->nTimeMax = (pindex->pprev ? std::max(pindex->pprev->nTimeMax, pindex->nTime) : pindex->nTime);
+        const auto timemax_end{SteadyClock::now()};
+
+        reconstruction_algo_time += algo_end - algo_start;
+        reconstruction_chainwork_time += chainwork_end - algo_end;
+        reconstruction_timemax_time += timemax_end - chainwork_end;
+        const auto linkage_start{SteadyClock::now()};
 
         // We can link the chain of blocks for which we've received transactions at some point, or
         // blocks that are assumed-valid on the basis of snapshot load (see
@@ -621,8 +634,14 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
         if (pindex->pprev) {
             pindex->BuildSkip();
         }
+        reconstruction_linkage_time += SteadyClock::now() - linkage_start;
     }
 
+    LogPrintf("Startup timing: block-index reconstruction detail: algo=%d ms chainwork=%d ms timemax=%d ms linkage=%d ms\n",
+              Ticks<std::chrono::milliseconds>(reconstruction_algo_time),
+              Ticks<std::chrono::milliseconds>(reconstruction_chainwork_time),
+              Ticks<std::chrono::milliseconds>(reconstruction_timemax_time),
+              Ticks<std::chrono::milliseconds>(reconstruction_linkage_time));
     LogPrintf("Startup timing: block-index reconstruction pass: %d entries in %d ms\n",
               nProcessed, Ticks<std::chrono::milliseconds>(SteadyClock::now() - process_start));
     return true;
