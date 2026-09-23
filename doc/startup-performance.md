@@ -133,3 +133,42 @@ conditions are warm or cold when comparing absolute timings.
 
 Instrumentation commits should remain separate from optimization commits so that
 measurement overhead can be removed when evaluating final performance.
+
+
+## Reconstruction profiling follow-up
+
+A follow-up run at 24,261,668 block-index entries instrumented the major groups
+inside the height-ordered reconstruction loop:
+
+| Reconstruction group | Time |
+| --- | ---: |
+| Per-algorithm history propagation/update | 1.233 s |
+| Chain-work reconstruction / `GetBlockProof()` | 147.561 s |
+| `nTimeMax` reconstruction | 0.853 s |
+| Transaction linkage, failure propagation and skip-list work | 1.486 s |
+| Entire instrumented reconstruction loop | 159.842 s |
+
+The per-group timers account for 151.133 seconds. The remaining approximately
+8.7 seconds includes loop/progress/interrupt/contiguity overhead and profiling
+overhead.
+
+This falsifies the initial hypothesis that copying `lastAlgoBlocks` is a major
+startup-time cost. It remains a major memory target, but consumed less than one
+percent of the measured reconstruction loop. The dominant startup CPU cost is
+chain-work reconstruction, specifically the expression containing
+`GetBlockProof(*pindex)`, at about 92% of the whole reconstruction loop.
+
+The follow-up run reached RPC readiness in 461.300 seconds. Other major phases
+were stable relative to the first instrumented run: count pass 13.497 s,
+deserialize 72.449 s, first sort 12.235 s, second vector 3.619 s, second sort
+13.828 s, candidate/header pass 27.866 s, Oracle history 120.660 s, and system
+health 12.360 s. Peak RSS was approximately 10.08 GiB and settled anonymous RSS
+approximately 7.64 GiB.
+
+### Next profiling target
+
+Before changing chain-work semantics, profile the internals of
+`GetBlockProof(const CBlockIndex&)`. Determine whether the cost is dominated by
+compact-target decoding, 256-bit division, algorithm-specific work adjustment,
+or another operation. Any optimization here must preserve exact chain-work
+values across all DigiByte algorithms and historical consensus transitions.
