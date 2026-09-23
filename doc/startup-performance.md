@@ -261,3 +261,34 @@ it does not replace the other startup work already identified:
 Those remain independent optimization targets. Likewise, reducing
 `lastAlgoBlocks` memory remains valuable even though its reconstruction time is
 small.
+
+
+## Chain-work persistence prototype
+
+Branch: `perf/persist-chainwork-cache`
+
+The first prototype persists `CBlockIndex::nChainWork` as a trailing field in
+`CDiskBlockIndex`. Existing records remain readable: legacy records use the
+historical disk-index version value and have no trailing chain-work field, while
+newly written records use a new format version and include the 256-bit cumulative
+chain-work value.
+
+Normal block-index writes therefore cache chain work incrementally without a
+separate database or shutdown snapshot.
+
+During startup, records with persisted non-zero chain work reuse it. Legacy
+records fall back to the existing deterministic reconstruction. Reconstructed
+legacy records are rewritten in bounded batches so migration is resumable:
+an interrupted migration leaves a mixture of legacy and cached records, and the
+next startup recomputes only the remaining legacy records.
+
+This prototype intentionally leaves the other startup phases unchanged so the
+effect of chain-work persistence can be measured independently. The first run on
+an existing database is expected to be slower because it both performs the old
+chain-work reconstruction and rewrites the historical block-index records. The
+second run is the important benchmark.
+
+Before treating this as production-ready, verify disk-format round trips,
+old-version read compatibility, interrupted migration, reindex behavior, and
+cache invalidation rules for any future change to historical chain-work
+semantics.
