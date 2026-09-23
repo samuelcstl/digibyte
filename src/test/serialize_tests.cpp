@@ -2,6 +2,7 @@
 // Copyright (c) 2014-2026 The DigiByte Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+#include <chain.h>
 #include <hash.h>
 #include <serialize.h>
 #include <streams.h>
@@ -85,6 +86,31 @@ BOOST_AUTO_TEST_CASE(sizes)
     BOOST_CHECK_EQUAL(GetSerializeSize(int64_t(0), 0), 8U);
     BOOST_CHECK_EQUAL(GetSerializeSize(uint64_t(0), 0), 8U);
     BOOST_CHECK_EQUAL(GetSerializeSize(bool(0), 0), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(disk_block_index_chainwork_roundtrip)
+{
+    LOCK(cs_main);
+
+    CBlockIndex index;
+    index.nHeight = 123456;
+    index.nVersion = 4;
+    index.nTime = 1700000000;
+    index.nBits = 0x1d00ffff;
+    index.nNonce = 42;
+    index.nChainWork.SetHex("000000000000000000000000000000000000000000000000123456789abcdef0");
+
+    CDiskBlockIndex encoded{&index};
+    DataStream stream;
+    stream << encoded;
+
+    CDiskBlockIndex decoded;
+    stream >> decoded;
+
+    BOOST_CHECK(decoded.HasPersistedChainWork());
+    BOOST_CHECK(decoded.nChainWork == index.nChainWork);
+    BOOST_CHECK_EQUAL(decoded.nHeight, index.nHeight);
+    BOOST_CHECK_EQUAL(decoded.nBits, index.nBits);
 }
 
 BOOST_AUTO_TEST_CASE(varints)
