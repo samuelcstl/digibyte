@@ -172,3 +172,92 @@ Before changing chain-work semantics, profile the internals of
 compact-target decoding, 256-bit division, algorithm-specific work adjustment,
 or another operation. Any optimization here must preserve exact chain-work
 values across all DigiByte algorithms and historical consensus transitions.
+
+
+## Persisted chain-work investigation
+
+The reconstruction profile changes the architectural question from merely making
+`GetBlockProof()` faster to deciding whether historical chain work should be
+recomputed on every normal startup.
+
+### Why reconstruction is unusually expensive in DigiByte
+
+For mainnet heights below `workComputationChangeTarget` (1,430,000),
+`GetBlockProof()` derives work from the block's compact target and an
+algorithm-dependent scale factor.
+
+From height 1,430,000 onward, the implementation is substantially more expensive.
+For every block it computes a geometric mean across the active proof-of-work
+algorithms. For every active algorithm it calls `GetNextWorkRequired()`, which
+selects the V4 difficulty algorithm in this era. V4 walks back
+`NUM_ALGOS * nAveragingInterval` blocks (50 with the mainnet parameters),
+locates the previous block for that algorithm, calculates median-time-past
+values, and performs retarget arithmetic. The resulting targets are each passed
+through `ApproxNthRoot(NUM_ALGOS)` before being multiplied together.
+
+At a block-index size of roughly 24.26 million entries, more than 22.8 million
+entries are in this post-DigiSpeed chain-work regime. This explains why an
+operation that is cheap enough to reconstruct in Bitcoin Core has become a major
+startup cost in DigiByte.
+
+### Chain work is already known before it is discarded
+
+Normal header insertion in `BlockManager::AddToBlockIndex()` computes
+
+`parent.nChainWork + GetBlockProof(block)`
+
+and then marks the new block-index entry dirty. `WriteBlockIndexDB()` later
+passes dirty entries to `BlockTreeDB::WriteBatchSync()`, which serializes each
+one as a `CDiskBlockIndex`.
+
+However, `CBlockIndex::nChainWork` is explicitly marked memory-only and
+`CDiskBlockIndex::SERIALIZE_METHODS` does not serialize it. Therefore the
+expensive value is known during ordinary operation, but is discarded from the
+persistent block index. On the next startup, all entries are height-sorted and
+the value is recomputed from genesis.
+
+### Candidate persistence design
+
+A promising design is to persist the already-computed chain-work value with each
+block-index record. This naturally handles side branches as well as the active
+chain because chain work belongs to each block index entry, not merely to a
+height.
+
+The block-index record already begins with a serialized version value. A
+versioned extension could allow new records to carry chain work while still
+recognizing legacy records. Existing records would require a one-time
+reconstruction/migration. New blocks would then persist their chain work through
+the existing dirty-block-index write path.
+
+A prototype must explicitly test mixed old/new records, downgrade behavior,
+interrupted migration, reindex behavior, corrupted records, and all supported
+networks before this can be treated as a production design.
+
+### Alternative cache designs
+
+A separate sidecar cache avoids changing `CDiskBlockIndex`, but needs its own
+mapping from block hash to derived state or a robust scheme for maintaining
+alignment with the block-index database. A hash-keyed sidecar duplicates a large
+amount of key material and introduces another database to keep synchronized.
+
+Persisting chain work directly in the existing block-index record appears
+structurally simpler, but the compatibility and validation properties need to be
+proven rather than assumed.
+
+### Important separation of concerns
+
+Persisted chain work would remove the dominant measured reconstruction cost, but
+it does not replace the other startup work already identified:
+
+- the count-only LevelDB pass;
+- deserialization;
+- height ordering;
+- `lastAlgoBlocks`, `nTimeMax`, chain-transaction and skip-pointer
+  reconstruction;
+- duplicate vector/sort work;
+- candidate/header processing; and
+- Oracle and system-health reconstruction.
+
+Those remain independent optimization targets. Likewise, reducing
+`lastAlgoBlocks` memory remains valuable even though its reconstruction time is
+small.
