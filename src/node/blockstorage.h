@@ -16,6 +16,7 @@
 #include <util/fs.h>
 #include <util/hasher.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cstdint>
