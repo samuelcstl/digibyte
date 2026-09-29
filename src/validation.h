@@ -1102,7 +1102,7 @@ public:
     node::BlockMap& BlockIndex() EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
     {
         AssertLockHeld(::cs_main);
-        return m_blockman.m_block_index;
+        return m_blockman.m_block_index.RawMap();
     }
 
     /**
