@@ -2317,6 +2317,7 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
     const CNetMsgMaker msgMaker(PROTOCOL_VERSION);
 
     LOCK(cs_main);
+    auto block_index_no_io = m_chainman.m_blockman.m_block_index.EnterNoIO();
 
     if (pindex->nHeight <= m_highest_fast_announce)
         return;
