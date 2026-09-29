@@ -477,7 +477,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-blocksdir=<dir>", "Specify directory to hold blocks subdirectory for *.dat files (default: <datadir>)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-fastprune", "Use smaller block files and lower minimum prune height for testing purposes", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-blockindexmode=<mode>", "Block-index residency policy: full, balanced, or lowmem (default: full)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
-    argsman.AddArg("-blockindexhotdepth=<n>", strprintf("Number of active-chain block indexes whose derived hot payload is prewarmed in balanced/lowmem mode (default: %u)", node::DEFAULT_BLOCK_INDEX_HOT_DEPTH), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-blockindexhotdepth=<n>", strprintf("Number of active-chain block indexes whose derived hot payload is prewarmed in balanced/lowmem mode (default: %u)", kernel::DEFAULT_BLOCK_INDEX_HOT_DEPTH), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
 #if HAVE_SYSTEM
     argsman.AddArg("-blocknotify=<cmd>", "Execute command when the best block changes (%s in cmd is replaced by block hash)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #endif
