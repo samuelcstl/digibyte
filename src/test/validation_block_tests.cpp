@@ -24,6 +24,8 @@
 #define APPLY_BLOCK_TIME(block) SetMockTime((block)->nTime)
 
 using node::BlockAssembler;
+using node::BlockIndexResidencyMode;
+using node::BlockIndexStore;
 
 namespace validation_block_tests {
 struct MinerTestingSetup : public RegTestingSetup {
@@ -36,6 +38,43 @@ struct MinerTestingSetup : public RegTestingSetup {
 } // namespace validation_block_tests
 
 BOOST_FIXTURE_TEST_SUITE(validation_block_tests, MinerTestingSetup)
+
+BOOST_AUTO_TEST_CASE(block_index_store_full_residency_invariants)
+{
+    BlockIndexStore store;
+    BOOST_CHECK(store.GetMode() == BlockIndexResidencyMode::FULL);
+    BOOST_CHECK(store.empty());
+    BOOST_CHECK(store.BackingReadAllowed());
+
+    const uint256 hash_a{uint256S("01")};
+    const uint256 hash_b{uint256S("02")};
+
+    auto [it_a, inserted_a] = store.try_emplace(hash_a);
+    BOOST_REQUIRE(inserted_a);
+    CBlockIndex* stable_a = &it_a->second;
+
+    auto [it_b, inserted_b] = store.try_emplace(hash_b);
+    BOOST_REQUIRE(inserted_b);
+    BOOST_CHECK_EQUAL(store.size(), 2U);
+
+    {
+        auto no_io = store.EnterNoIO();
+        BOOST_CHECK(!store.BackingReadAllowed());
+
+        auto found = store.find(hash_a);
+        BOOST_REQUIRE(found != store.end());
+        BOOST_CHECK_EQUAL(&found->second, stable_a);
+    }
+
+    BOOST_CHECK(store.BackingReadAllowed());
+
+    const auto stats{store.GetResidencyStats()};
+    BOOST_CHECK_EQUAL(stats.insertions, 2U);
+    BOOST_CHECK_EQUAL(stats.no_io_scopes, 1U);
+    BOOST_CHECK_EQUAL(stats.backing_reads, 0U);
+    BOOST_CHECK_EQUAL(stats.no_io_violations, 0U);
+    BOOST_CHECK_GE(stats.lookup_hits, 1U);
+}
 
 struct TestSubscriber final : public CValidationInterface {
     uint256 m_expected_tip;
