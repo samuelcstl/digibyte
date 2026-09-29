@@ -412,24 +412,38 @@ const CBlockIndex* GetLastBlockIndexForAlgo(const CBlockIndex* pindex, const Con
 
 const CBlockIndex* GetLastBlockIndexForAlgoFast(const CBlockIndex* pindex, const Consensus::Params& params, int algo)
 {
-    // DGB-BUG-011 FIX: Check algo bounds before using as array index
-    // If algo is ALGO_UNKNOWN (-1) or out of bounds, fall back to slow iteration
+    // Invalid/unknown algorithms retain the canonical walking implementation.
     if (algo < 0 || algo >= NUM_ALGOS_IMPL) {
         return GetLastBlockIndexForAlgo(pindex, params, algo);
     }
 
-    for (; pindex; pindex = pindex->lastAlgoBlocks[algo])
+    while (pindex)
     {
-        if (pindex->GetAlgo() != algo)
-            continue;
-        if (params.fPowAllowMinDifficultyBlocks &&
-            pindex->pprev &&
-            pindex->nTime > pindex->pprev->nTime + params.nTargetSpacing*2)
-        {
-            pindex = pindex->pprev;
-            continue;
+        if (pindex->GetAlgo() == algo) {
+            // Ignore special min-difficulty blocks exactly as the canonical
+            // implementation does.
+            if (params.fPowAllowMinDifficultyBlocks &&
+                pindex->pprev &&
+                pindex->nTime > pindex->pprev->nTime + params.nTargetSpacing*2)
+            {
+                pindex = pindex->pprev;
+                continue;
+            }
+            return pindex;
         }
-        return pindex;
+
+        // A hot block can jump directly to the most recent block for this
+        // algorithm. Cold history has no payload and simply falls back to the
+        // canonical pprev walk. No backing-store access is involved.
+        if (pindex->HasResidentAlgoHistory()) {
+            const CBlockIndex* cached{pindex->GetResidentLastAlgoBlock(algo)};
+            if (cached && cached != pindex) {
+                pindex = cached;
+                continue;
+            }
+        }
+
+        return GetLastBlockIndexForAlgo(pindex->pprev, params, algo);
     }
 
     return nullptr;
