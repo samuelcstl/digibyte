@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cassert>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <limits>
 #include <map>
@@ -85,11 +86,7 @@ extern std::atomic_bool fReindex;
 // containers), or make the key a `std::unique_ptr<CBlockIndex>`
 using BlockMap = std::unordered_map<uint256, CBlockIndex, BlockHasher>;
 
-enum class BlockIndexResidencyMode {
-    FULL,
-    BALANCED,
-    LOWMEM,
-};
+using kernel::BlockIndexResidencyMode;
 
 struct BlockIndexResidencyStats {
     uint64_t lookups{0};
@@ -99,6 +96,8 @@ struct BlockIndexResidencyStats {
     uint64_t no_io_scopes{0};
     uint64_t backing_reads{0};
     uint64_t no_io_violations{0};
+    uint64_t algo_payloads_created{0};
+    uint64_t algo_prewarm_blocks{0};
 };
 
 /**
@@ -114,6 +113,13 @@ struct BlockIndexResidencyStats {
 class BlockIndexStore
 {
 public:
+    explicit BlockIndexStore(
+        BlockIndexResidencyMode mode = BlockIndexResidencyMode::FULL,
+        size_t hot_depth = kernel::DEFAULT_BLOCK_INDEX_HOT_DEPTH)
+        : m_mode{mode}, m_hot_depth{hot_depth}
+    {
+    }
+
     using iterator = BlockMap::iterator;
     using const_iterator = BlockMap::const_iterator;
     using size_type = BlockMap::size_type;
@@ -199,7 +205,61 @@ public:
     const BlockMap& RawMap() const noexcept { return m_entries; }
 
     [[nodiscard]] BlockIndexResidencyMode GetMode() const noexcept { return m_mode; }
+    [[nodiscard]] size_t GetHotDepth() const noexcept { return m_hot_depth; }
     [[nodiscard]] BlockIndexResidencyStats GetResidencyStats() const noexcept { return m_stats; }
+    [[nodiscard]] size_t ResidentAlgoPayloads() const noexcept { return m_algo_payloads.size(); }
+
+    static const char* ModeName(BlockIndexResidencyMode mode) noexcept
+    {
+        switch (mode) {
+        case BlockIndexResidencyMode::FULL: return "full";
+        case BlockIndexResidencyMode::BALANCED: return "balanced";
+        case BlockIndexResidencyMode::LOWMEM: return "lowmem";
+        }
+        return "unknown";
+    }
+
+    BlockIndexResidentPayload& EnsureAlgoHistory(CBlockIndex& index)
+    {
+        if (index.m_resident_payload) return *index.m_resident_payload;
+
+        m_algo_payloads.emplace_back();
+        BlockIndexResidentPayload& payload{m_algo_payloads.back()};
+
+        if (index.pprev && index.pprev->m_resident_payload) {
+            payload.last_algo_blocks = index.pprev->m_resident_payload->last_algo_blocks;
+        }
+
+        const int algo{index.GetAlgo()};
+        if (algo >= 0 && algo < NUM_ALGOS_IMPL) {
+            payload.last_algo_blocks[algo] = &index;
+        }
+
+        index.m_resident_payload = &payload;
+        ++m_stats.algo_payloads_created;
+        return payload;
+    }
+
+    size_t PrewarmAlgoHistory(CBlockIndex* tip)
+    {
+        if (m_mode == BlockIndexResidencyMode::FULL || !tip || m_hot_depth == 0) return 0;
+
+        std::vector<CBlockIndex*> warm;
+        warm.reserve(std::min<size_t>(m_hot_depth, static_cast<size_t>(tip->nHeight) + 1));
+        for (CBlockIndex* ancestor{tip}; ancestor && warm.size() < m_hot_depth; ancestor = ancestor->pprev) {
+            warm.push_back(ancestor);
+        }
+
+        size_t warmed{0};
+        for (auto it = warm.rbegin(); it != warm.rend(); ++it) {
+            if (!(*it)->HasResidentAlgoHistory()) {
+                EnsureAlgoHistory(**it);
+                ++warmed;
+            }
+        }
+        m_stats.algo_prewarm_blocks += warmed;
+        return warmed;
+    }
 
     /**
      * Mark a scope in which block-index backing-store I/O is forbidden.
@@ -235,6 +295,8 @@ private:
 
     BlockMap m_entries;
     BlockIndexResidencyMode m_mode{BlockIndexResidencyMode::FULL};
+    size_t m_hot_depth{kernel::DEFAULT_BLOCK_INDEX_HOT_DEPTH};
+    std::deque<BlockIndexResidentPayload> m_algo_payloads;
     mutable BlockIndexResidencyStats m_stats;
     uint32_t m_no_io_depth{0};
 };
@@ -409,7 +471,8 @@ public:
     explicit BlockManager(const util::SignalInterrupt& interrupt, Options opts)
         : m_prune_mode{opts.prune_target > 0},
           m_opts{std::move(opts)},
-          m_interrupt{interrupt} {};
+          m_interrupt{interrupt},
+          m_block_index{m_opts.block_index_mode, m_opts.block_index_hot_depth} {};
 
     const util::SignalInterrupt& m_interrupt;
     std::atomic<bool> m_importing{false};
