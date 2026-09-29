@@ -3814,6 +3814,7 @@ public:
 bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool)
 {
     AssertLockHeld(cs_main);
+    auto block_index_no_io = m_blockman.m_block_index.EnterNoIO();
     if (m_mempool) AssertLockHeld(m_mempool->cs);
 
     assert(pindexNew->pprev == m_chain.Tip());
@@ -3997,6 +3998,7 @@ void Chainstate::PruneBlockIndexCandidates() {
 bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, ConnectTrace& connectTrace)
 {
     AssertLockHeld(cs_main);
+    auto block_index_no_io = m_blockman.m_block_index.EnterNoIO();
     if (m_mempool) AssertLockHeld(m_mempool->cs);
 
     const CBlockIndex* pindexOldTip = m_chain.Tip();
@@ -4934,6 +4936,7 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
 bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked)
 {
     AssertLockHeld(cs_main);
+    auto block_index_no_io = m_blockman.m_block_index.EnterNoIO();
 
     // Check for duplicate
     uint256 hash = block.GetHash();
@@ -5102,6 +5105,7 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
 
     if (fNewBlock) *fNewBlock = false;
     AssertLockHeld(cs_main);
+    auto block_index_no_io = m_blockman.m_block_index.EnterNoIO();
 
     CBlockIndex *pindexDummy = nullptr;
     CBlockIndex *&pindex = ppindex ? *ppindex : pindexDummy;
