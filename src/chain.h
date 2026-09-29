@@ -447,8 +447,15 @@ public:
 
         // nChainWork is expensive to reconstruct on DigiByte after DigiSpeed.
         // Old records simply end after nNonce and are migrated lazily at startup.
+        // arith_uint256 is an arithmetic helper rather than a serializable type,
+        // so persist its canonical uint256 representation.
         if (_nVersion >= CHAINWORK_VERSION) {
-            READWRITE(obj.nChainWork);
+            SER_WRITE(obj, s << ArithToUint256(obj.nChainWork));
+            SER_READ(obj, {
+                uint256 chain_work;
+                s >> chain_work;
+                obj.nChainWork = UintToArith256(chain_work);
+            });
         }
     }
 
