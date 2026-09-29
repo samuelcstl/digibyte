@@ -9,6 +9,7 @@
 #include <chain.h>
 #include <uint256.h>
 
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <type_traits>
@@ -107,6 +108,32 @@ static_assert(sizeof(CompactBlockIndexEntry) == 160,
               "compact block-index v1 entry size changed");
 
 static constexpr uint32_t COMPACT_BLOCK_INDEX_FORMAT_VERSION{1};
+static constexpr std::array<unsigned char, 8> COMPACT_BLOCK_INDEX_MAGIC{
+    {'D', 'G', 'B', 'C', 'B', 'I', '1', '\0'}};
+
+/**
+ * Header of the mmap-able compact historical-index file.
+ *
+ * The generation field is bumped after an atomic rebuild/swap. A future writer
+ * will fsync the data before publishing a header with the new generation.
+ */
+struct CompactBlockIndexFileHeader
+{
+    std::array<unsigned char, 8> magic{COMPACT_BLOCK_INDEX_MAGIC};
+    uint32_t version{COMPACT_BLOCK_INDEX_FORMAT_VERSION};
+    uint32_t entry_size{sizeof(CompactBlockIndexEntry)};
+    uint64_t entry_count{0};
+    BlockIndexId active_tip{INVALID_BLOCK_INDEX_ID};
+    uint32_t flags{0};
+    uint256 genesis_hash{};
+    uint256 best_hash{};
+    uint64_t generation{0};
+    uint64_t reserved[3]{};
+};
+
+static_assert(std::is_standard_layout_v<CompactBlockIndexFileHeader>);
+static_assert(sizeof(CompactBlockIndexFileHeader) == 128,
+              "compact block-index v1 file header size changed");
 
 } // namespace node
 
