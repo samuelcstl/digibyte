@@ -353,16 +353,9 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
         pindexNew->nHeight = pindexNew->pprev->nHeight + 1;
         pindexNew->BuildSkip();
     }
-    // Use memcpy to copy the entire array at once.
-    if (pindexNew->pprev) {
-        memcpy(pindexNew->lastAlgoBlocks, pindexNew->pprev->lastAlgoBlocks, sizeof(pindexNew->lastAlgoBlocks));
-        // DGB-BUG-011 FIX: Check bounds before array access to prevent crash
-        // when GetAlgo() returns ALGO_UNKNOWN (-1) for unrecognized block versions
-        int algo = pindexNew->GetAlgo();
-        if (algo >= 0 && algo < NUM_ALGOS_IMPL) {
-            pindexNew->lastAlgoBlocks[algo] = pindexNew;
-        }
-    }
+    // A newly accepted header is live state. Keep its algorithm-history
+    // accelerator resident in every mode so validation/mining never needs I/O.
+    m_block_index.EnsureAlgoHistory(*pindexNew);
     pindexNew->nTimeMax = (pindexNew->pprev ? std::max(pindexNew->pprev->nTimeMax, pindexNew->nTime) : pindexNew->nTime);
     pindexNew->nChainWork = (pindexNew->pprev ? pindexNew->pprev->nChainWork : 0) + GetBlockProof(*pindexNew);
     pindexNew->RaiseValidity(BLOCK_VALID_TREE);
@@ -609,15 +602,8 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
         }
         previous_index = pindex;
         const auto algo_start{SteadyClock::now()};
-        // Use memcpy to copy the entire array at once.
-        if (pindex->pprev) {
-            memcpy(pindex->lastAlgoBlocks, pindex->pprev->lastAlgoBlocks, sizeof(pindex->lastAlgoBlocks));
-            // DGB-BUG-011 FIX: Check bounds before array access to prevent crash
-            // when GetAlgo() returns ALGO_UNKNOWN (-1) for unrecognized block versions
-            int algo = pindex->GetAlgo();
-            if (algo >= 0 && algo < NUM_ALGOS_IMPL) {
-                pindex->lastAlgoBlocks[algo] = pindex;
-            }
+        if (m_block_index.GetMode() == BlockIndexResidencyMode::FULL) {
+            m_block_index.EnsureAlgoHistory(*pindex);
         }
         const auto algo_end{SteadyClock::now()};
         if (pindex->nChainWork != 0) {
