@@ -5,6 +5,7 @@
 #include <chain.h>
 #include <chainparams.h>
 #include <pow.h>
+#include <node/blockstorage.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <util/chaintype.h>
@@ -292,6 +293,45 @@ BOOST_AUTO_TEST_CASE(digibyte_difficulty_versions_test)
         bnNew.SetCompact(nBits);
         BOOST_CHECK(bnNew > 0);
         BOOST_CHECK(bnNew <= UintToArith256(params.powLimit));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(digibyte_algo_history_residency_equivalence)
+{
+    const auto chain_params = CreateChainParams(*m_node.args, ChainType::MAIN);
+    const auto& params = chain_params->GetConsensus();
+
+    static constexpr std::array<int, 5> ALGOS{
+        ALGO_SHA256D, ALGO_SCRYPT, ALGO_SKEIN, ALGO_QUBIT, ALGO_ODO,
+    };
+
+    std::vector<CBlockIndex> blocks(120);
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        blocks[i].pprev = i ? &blocks[i - 1] : nullptr;
+        blocks[i].nHeight = 2'000'000 + i;
+        blocks[i].nVersion = GetVersionForAlgo(ALGOS[i % ALGOS.size()]);
+        blocks[i].nTime = 1'700'000'000 + i * 15;
+    }
+
+    node::BlockIndexStore store{node::BlockIndexResidencyMode::BALANCED, 30};
+    BOOST_CHECK_EQUAL(store.PrewarmAlgoHistory(&blocks.back()), 30U);
+    BOOST_CHECK_EQUAL(store.ResidentAlgoPayloads(), 30U);
+    BOOST_CHECK(!blocks[89].HasResidentAlgoHistory());
+    BOOST_CHECK(blocks[90].HasResidentAlgoHistory());
+
+    for (const int algo : ALGOS) {
+        // A completely cold historical lookup must remain semantically identical.
+        BOOST_CHECK_EQUAL(
+            GetLastBlockIndexForAlgoFast(&blocks[50], params, algo),
+            GetLastBlockIndexForAlgo(&blocks[50], params, algo));
+
+        // Exercise every point in the partially seeded/hot window. The first few
+        // payloads intentionally have incomplete history and must fall back cleanly.
+        for (size_t i = 90; i < blocks.size(); ++i) {
+            BOOST_CHECK_EQUAL(
+                GetLastBlockIndexForAlgoFast(&blocks[i], params, algo),
+                GetLastBlockIndexForAlgo(&blocks[i], params, algo));
+        }
     }
 }
 
