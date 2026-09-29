@@ -17,6 +17,7 @@
 #include <uint256.h>
 #include <util/time.h>
 
+#include <array>
 #include <vector>
 
 /**
@@ -138,6 +139,13 @@ enum BlockStatus : uint32_t {
     BLOCK_ASSUMED_VALID      =   256,
 };
 
+class CBlockIndex;
+
+struct BlockIndexResidentPayload
+{
+    std::array<CBlockIndex*, NUM_ALGOS_IMPL> last_algo_blocks{};
+};
+
 /** The block chain is a tree shaped structure starting with the
  * genesis block at the root, with each block potentially having multiple
  * candidates to be the next block. A blockindex may have multiple pprev pointing
@@ -208,9 +216,22 @@ public:
     //! (memory only) Maximum nTime in the chain up to and including this block.
     unsigned int nTimeMax{0};
 
-    //! DigiByte: Track last block per algorithm for multi-algo mining
-    CBlockIndex *lastAlgoBlocks[NUM_ALGOS_IMPL];
+    /**
+     * Optional residency-managed payload. BlockIndexStore owns this object.
+     * Cold historical block indexes intentionally leave it null.
+     */
+    BlockIndexResidentPayload* m_resident_payload{nullptr};
 
+    [[nodiscard]] bool HasResidentAlgoHistory() const noexcept
+    {
+        return m_resident_payload != nullptr;
+    }
+
+    [[nodiscard]] CBlockIndex* GetResidentLastAlgoBlock(int algo) const noexcept
+    {
+        if (!m_resident_payload || algo < 0 || algo >= NUM_ALGOS_IMPL) return nullptr;
+        return m_resident_payload->last_algo_blocks[algo];
+    }
 
     /**
      * Full constructor that copies fields from a block header.
