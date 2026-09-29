@@ -17,6 +17,7 @@
 #include <util/hasher.h>
 
 #include <atomic>
+#include <cassert>
 #include <cstdint>
 #include <functional>
 #include <limits>
