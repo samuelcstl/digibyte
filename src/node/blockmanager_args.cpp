@@ -32,6 +32,25 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, BlockManager::Op
 
     if (auto value{args.GetBoolArg("-fastprune")}) opts.fast_prune = *value;
 
+    if (auto value{args.GetArg("-blockindexmode")}) {
+        if (*value == "full") {
+            opts.block_index_mode = kernel::BlockIndexResidencyMode::FULL;
+        } else if (*value == "balanced") {
+            opts.block_index_mode = kernel::BlockIndexResidencyMode::BALANCED;
+        } else if (*value == "lowmem") {
+            opts.block_index_mode = kernel::BlockIndexResidencyMode::LOWMEM;
+        } else {
+            return util::Error{strprintf(Untranslated("Invalid -blockindexmode=%s (expected full, balanced, or lowmem)"), *value)};
+        }
+    }
+
+    if (auto value{args.GetIntArg("-blockindexhotdepth")}) {
+        if (*value < 0) {
+            return util::Error{Untranslated("-blockindexhotdepth cannot be negative")};
+        }
+        opts.block_index_hot_depth = static_cast<size_t>(*value);
+    }
+
     return {};
 }
 } // namespace node
