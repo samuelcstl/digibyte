@@ -8,11 +8,20 @@
 #include <kernel/notifications_interface.h>
 #include <util/fs.h>
 
+#include <cstddef>
 #include <cstdint>
 
 class CChainParams;
 
 namespace kernel {
+
+enum class BlockIndexResidencyMode {
+    FULL,
+    BALANCED,
+    LOWMEM,
+};
+
+static constexpr size_t DEFAULT_BLOCK_INDEX_HOT_DEPTH{40320};
 
 /**
  * An options struct for `BlockManager`, more ergonomically referred to as
@@ -22,6 +31,8 @@ struct BlockManagerOpts {
     const CChainParams& chainparams;
     uint64_t prune_target{0};
     bool fast_prune{false};
+    BlockIndexResidencyMode block_index_mode{BlockIndexResidencyMode::FULL};
+    size_t block_index_hot_depth{DEFAULT_BLOCK_INDEX_HOT_DEPTH};
     const fs::path blocks_dir;
     Notifications& notifications;
 };
