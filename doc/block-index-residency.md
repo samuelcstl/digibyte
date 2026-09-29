@@ -483,3 +483,26 @@ Historical RPC latency may intentionally trade off against RAM use.
 
 This staging gives useful memory reductions early while keeping the current
 pointer/lifetime model intact until the residency layer has proved itself.
+
+
+## Implementation status
+
+The first structural milestone is now represented on this branch.
+
+- `BlockIndexStore` owns the existing `BlockMap` while preserving stable
+  `CBlockIndex*` identity and the current full-residency behavior.
+- The existing `ChainstateManager::BlockIndex()` API still exposes the raw map
+  as a temporary compatibility escape hatch. New residency-aware code should use
+  `BlockIndexStore` instead.
+- Lookup, insertion and no-I/O scope counters are present.
+- `RecordBackingRead()` is the mandatory hook for future lazy payload reads.
+  Debug builds assert if a backing read occurs inside a no-I/O scope, while
+  release builds retain a violation counter.
+- Mining template creation, header/block acceptance, best-chain activation and
+  fast compact-block relay are marked as no-I/O block-index paths.
+- A unit test covers full-mode store behavior, stable object identity and nested
+  no-I/O policy state.
+
+This milestone intentionally does not reduce memory yet. Its purpose is to
+insert and test the indirection boundary before moving the first real payload,
+with `lastAlgoBlocks` remaining the planned first memory-saving target.
