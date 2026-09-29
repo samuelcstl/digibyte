@@ -5312,6 +5312,14 @@ bool Chainstate::LoadChainTip()
         return false;
     }
     m_chain.SetTip(*pindex);
+
+    const size_t algo_warmed{m_blockman.m_block_index.PrewarmAlgoHistory(m_chain.Tip())};
+    LogPrintf("Block-index residency: mode=%s hotdepth=%u algo_payloads=%u prewarmed=%u\n",
+              node::BlockIndexStore::ModeName(m_blockman.m_block_index.GetMode()),
+              m_blockman.m_block_index.GetHotDepth(),
+              m_blockman.m_block_index.ResidentAlgoPayloads(),
+              algo_warmed);
+
     PruneBlockIndexCandidates();
 
     tip = m_chain.Tip();
