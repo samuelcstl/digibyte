@@ -84,6 +84,160 @@ extern std::atomic_bool fReindex;
 // containers), or make the key a `std::unique_ptr<CBlockIndex>`
 using BlockMap = std::unordered_map<uint256, CBlockIndex, BlockHasher>;
 
+enum class BlockIndexResidencyMode {
+    FULL,
+    BALANCED,
+    LOWMEM,
+};
+
+struct BlockIndexResidencyStats {
+    uint64_t lookups{0};
+    uint64_t lookup_hits{0};
+    uint64_t lookup_misses{0};
+    uint64_t insertions{0};
+    uint64_t no_io_scopes{0};
+    uint64_t backing_reads{0};
+    uint64_t no_io_violations{0};
+};
+
+/**
+ * Stable owner for block-index identity objects.
+ *
+ * The first residency implementation deliberately keeps every CBlockIndex
+ * object resident, preserving the existing pointer/lifetime contract. Future
+ * modes can move selected payload domains behind this store without changing
+ * callers that only need stable CBlockIndex identity.
+ *
+ * All access is currently protected by cs_main through BlockManager.
+ */
+class BlockIndexStore
+{
+public:
+    using iterator = BlockMap::iterator;
+    using const_iterator = BlockMap::const_iterator;
+    using size_type = BlockMap::size_type;
+
+    class NoIOGuard
+    {
+    public:
+        explicit NoIOGuard(BlockIndexStore& store) : m_store{&store}
+        {
+            ++m_store->m_no_io_depth;
+            ++m_store->m_stats.no_io_scopes;
+        }
+
+        NoIOGuard(const NoIOGuard&) = delete;
+        NoIOGuard& operator=(const NoIOGuard&) = delete;
+
+        NoIOGuard(NoIOGuard&& other) noexcept : m_store{std::exchange(other.m_store, nullptr)} {}
+        NoIOGuard& operator=(NoIOGuard&&) = delete;
+
+        ~NoIOGuard()
+        {
+            if (!m_store) return;
+            assert(m_store->m_no_io_depth > 0);
+            --m_store->m_no_io_depth;
+        }
+
+    private:
+        BlockIndexStore* m_store;
+    };
+
+    iterator begin() noexcept { return m_entries.begin(); }
+    const_iterator begin() const noexcept { return m_entries.begin(); }
+    const_iterator cbegin() const noexcept { return m_entries.cbegin(); }
+    iterator end() noexcept { return m_entries.end(); }
+    const_iterator end() const noexcept { return m_entries.end(); }
+    const_iterator cend() const noexcept { return m_entries.cend(); }
+
+    [[nodiscard]] bool empty() const noexcept { return m_entries.empty(); }
+    [[nodiscard]] size_type size() const noexcept { return m_entries.size(); }
+
+    iterator find(const uint256& hash)
+    {
+        auto it{m_entries.find(hash)};
+        NoteLookup(it != m_entries.end());
+        return it;
+    }
+
+    const_iterator find(const uint256& hash) const
+    {
+        auto it{m_entries.find(hash)};
+        NoteLookup(it != m_entries.end());
+        return it;
+    }
+
+    size_type count(const uint256& hash) const
+    {
+        const bool found{m_entries.find(hash) != m_entries.end()};
+        NoteLookup(found);
+        return found ? 1 : 0;
+    }
+
+    template <typename... Args>
+    std::pair<iterator, bool> try_emplace(const uint256& hash, Args&&... args)
+    {
+        auto result{m_entries.try_emplace(hash, std::forward<Args>(args)...)};
+        if (result.second) ++m_stats.insertions;
+        return result;
+    }
+
+    CBlockIndex& operator[](const uint256& hash)
+    {
+        auto [it, inserted]{m_entries.try_emplace(hash)};
+        if (inserted) {
+            ++m_stats.insertions;
+            NoteLookup(false);
+        } else {
+            NoteLookup(true);
+        }
+        return it->second;
+    }
+
+    BlockMap& RawMap() noexcept { return m_entries; }
+    const BlockMap& RawMap() const noexcept { return m_entries; }
+
+    [[nodiscard]] BlockIndexResidencyMode GetMode() const noexcept { return m_mode; }
+    [[nodiscard]] BlockIndexResidencyStats GetResidencyStats() const noexcept { return m_stats; }
+
+    /**
+     * Mark a scope in which block-index backing-store I/O is forbidden.
+     *
+     * Future lazy payload accessors must call RecordBackingRead() before
+     * performing synchronous storage I/O. Debug builds assert immediately if
+     * that happens inside a no-I/O scope; release builds retain a violation
+     * counter for diagnostics.
+     */
+    NoIOGuard EnterNoIO() { return NoIOGuard{*this}; }
+
+    [[nodiscard]] bool BackingReadAllowed() const noexcept { return m_no_io_depth == 0; }
+
+    void RecordBackingRead()
+    {
+        ++m_stats.backing_reads;
+        if (m_no_io_depth > 0) {
+            ++m_stats.no_io_violations;
+            assert(m_no_io_depth == 0 && "block-index backing read in no-I/O scope");
+        }
+    }
+
+private:
+    void NoteLookup(bool hit) const noexcept
+    {
+        ++m_stats.lookups;
+        if (hit) {
+            ++m_stats.lookup_hits;
+        } else {
+            ++m_stats.lookup_misses;
+        }
+    }
+
+    BlockMap m_entries;
+    BlockIndexResidencyMode m_mode{BlockIndexResidencyMode::FULL};
+    mutable BlockIndexResidencyStats m_stats;
+    uint32_t m_no_io_depth{0};
+};
+
 struct CBlockIndexWorkComparator {
     bool operator()(const CBlockIndex* pa, const CBlockIndex* pb) const;
 };
@@ -259,7 +413,7 @@ public:
     const util::SignalInterrupt& m_interrupt;
     std::atomic<bool> m_importing{false};
 
-    BlockMap m_block_index GUARDED_BY(cs_main);
+    BlockIndexStore m_block_index GUARDED_BY(cs_main);
 
     /**
      * The height of the base block of an assumeutxo snapshot, if one is in use.
