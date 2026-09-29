@@ -292,3 +292,66 @@ Before treating this as production-ready, verify disk-format round trips,
 old-version read compatibility, interrupted migration, reindex behavior, and
 cache invalidation rules for any future change to historical chain-work
 semantics.
+
+
+## Chain-work persistence benchmark
+
+A two-start benchmark validated the prototype behavior on a block index of about
+24.30 million records.
+
+### Migration startup
+
+The first startup began with no persisted chain-work values:
+
+- cached chain work loaded: 0 records;
+- cache hits: 0;
+- cache misses/migrated: 24,263,299;
+- chain-work reconstruction: 147.594 s;
+- cache write time: 160.710 s;
+- total reconstruction pass: 319.426 s.
+
+This confirms that the migration path performs the original deterministic
+chain-work computation and then persists the result. The block-index database
+grew by roughly 0.7 GB. The prototype currently uses synchronous 100,000-record
+migration batches, which caused substantial temporary/write-amplified I/O and
+should be redesigned before production use.
+
+### Cached startup
+
+After migration, the next normal startup loaded cached chain work for
+24,296,376 of 24,296,377 disk records. The height-ordered reconstruction loop
+reported:
+
+- cache hits: 24,296,376;
+- cache misses: 0;
+- migrated: 0;
+- cache writes: 0 ms;
+- chain-work bucket: 0.985 s;
+- total reconstruction pass: 10.592 s.
+
+Relative to the earlier instrumented baseline, chain-work reconstruction fell
+from 147.561 s to 0.985 s, and the full reconstruction pass fell from 159.842 s
+to 10.592 s.
+
+RPC readiness improved from 461.300 s in the comparable deep-instrumentation
+baseline to 320.577 s in the cached run, a reduction of 140.723 s (about 30.5%).
+Other large startup phases remained present: block-index deserialization was
+76.816 s, duplicate pointer-vector/sort work remained, Oracle reconstruction was
+119.804 s, and system-health reconstruction was 12.868 s.
+
+The result validates persistence as an effective normal-start optimization while
+also confirming that it does not materially reduce the node's steady-state
+historical block-index memory footprint.
+
+### Follow-up
+
+The persistence prototype should now be treated as a proven optimization idea but
+not yet production-ready. Remaining work includes:
+
+- redesigning one-time migration to reduce write amplification;
+- validating mixed-format, downgrade, interrupted-migration, reindex and
+  corruption behavior;
+- defining explicit cache invalidation/version semantics for future chain-work
+  rule changes; and
+- continuing independent work on the count-only DB pass, duplicate ordering,
+  Oracle startup reconstruction and historical block-index memory residency.
