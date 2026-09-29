@@ -73,7 +73,7 @@ BOOST_AUTO_TEST_CASE(block_index_store_full_residency_invariants)
     BOOST_CHECK_EQUAL(stats.no_io_scopes, 1U);
     BOOST_CHECK_EQUAL(stats.backing_reads, 0U);
     BOOST_CHECK_EQUAL(stats.no_io_violations, 0U);
-    BOOST_CHECK_GE(stats.lookup_hits, 1U);
+    BOOST_CHECK(stats.lookup_hits >= 1U);
 }
 
 struct TestSubscriber final : public CValidationInterface {
