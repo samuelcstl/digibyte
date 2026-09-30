@@ -1,5 +1,15 @@
 # Block-index residency audit
 
+> **Status note (Generation 2):** this document is the detailed residency and
+> hot-path audit that motivated the first implementation. The `lastAlgoBlocks`
+> payload extraction and no-I/O scopes described here have since been
+> implemented and measured. The canonical current architecture, migration
+> lifecycle, compatibility contract, lookup work and remaining pointer-owner
+> conversion roadmap now live in `doc/block-index-compact-store.md`. The
+> access-pattern, pin/lease, GETHEADERS, deep-reorg, instrumentation and
+> acceptance-criteria material below remains active design input rather than
+> obsolete history.
+
 ## Scope
 
 This document audits the current block-index access patterns with one goal:
