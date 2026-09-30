@@ -120,3 +120,32 @@ The first shadow-store milestone is implemented.
 The next milestone is to open this verified representation through a
 file-backed reader, add compact hash-to-id lookup and an active-chain id view,
 then begin replacing historical pointer ownership.
+
+
+## Startup parallelism follow-up
+
+The current startup path is predominantly serial and several expensive phases
+run while `cs_main` is held. This is worth auditing after the representation
+changes above, but parallelism should not be used to preserve work that the
+compact-store design can eliminate entirely.
+
+Priority order:
+
+1. First remove obsolete whole-history work through the compact store and
+   persisted derived state.
+2. Measure remaining phases using wall time, process CPU time and per-thread CPU
+   utilization.
+3. Parallelize only phases whose inputs are immutable and whose outputs can be
+   reduced deterministically without extending `cs_main` contention.
+
+Likely candidates include read-only compact-store verification, construction of
+auxiliary hash/id lookup tables, and independent validation/reduction passes.
+Poor candidates include chain-dependent reconstruction of `nChainWork`,
+`nTimeMax`, `nChainTx`, failed-child state and skip links, where each height
+depends on preceding state.
+
+Oracle startup is currently also a serial loop under `cs_main`, but persisting
+its derived price/volatility state is preferable to making the 172,800-block
+reconstruction scan multithreaded. If a bounded fallback scan remains after
+checkpointing, that fallback can then be evaluated separately for safe
+parallel I/O/validation.
