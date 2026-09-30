@@ -785,6 +785,66 @@ bool BlockManager::VerifyCompactBlockIndexLookup()
                   Ticks<std::chrono::milliseconds>(compact_negative_elapsed),
                   static_cast<double>(negative_probes) / samples,
                   negative_max_probes);
+
+        // Prototype the intended network-facing split: keep only keyed
+        // fingerprints and exact occupancy resident. Unknown hashes then probe
+        // anonymous memory exclusively; mapped id/full-hash state is touched
+        // only after a keyed fingerprint match.
+        std::string front_error;
+        const auto front_load_start{SteadyClock::now()};
+        if (m_compact_block_lookup->LoadResidentProbeFront(front_error)) {
+            LogPrintf("Compact block index: resident lookup front bytes=%u load=%d ms\n",
+                      m_compact_block_lookup->ResidentProbeFrontBytes(),
+                      Ticks<std::chrono::milliseconds>(SteadyClock::now() - front_load_start));
+
+            uint64_t resident_hits{0};
+            uint64_t resident_positive_probes{0};
+            uint32_t resident_positive_max{0};
+            const auto resident_positive_start{SteadyClock::now()};
+            for (uint64_t sample = 0; sample < samples; ++sample) {
+                const BlockIndexId id{static_cast<BlockIndexId>((sample * count) / samples)};
+                const CompactBlockIndexEntry* entry{m_compact_block_index->Get(id)};
+                uint32_t probes{0};
+                const auto found{m_compact_block_lookup->FindResident(
+                    entry->hash, *m_compact_block_index, &probes)};
+                resident_hits += found && *found == id;
+                resident_positive_probes += probes;
+                resident_positive_max = std::max(resident_positive_max, probes);
+            }
+            const auto resident_positive_elapsed{
+                SteadyClock::now() - resident_positive_start};
+
+            uint64_t resident_misses{0};
+            uint64_t resident_negative_probes{0};
+            uint32_t resident_negative_max{0};
+            const auto resident_negative_start{SteadyClock::now()};
+            for (const uint256& hash : negative_hashes) {
+                uint32_t probes{0};
+                const auto found{m_compact_block_lookup->FindResident(
+                    hash, *m_compact_block_index, &probes)};
+                resident_misses += !found;
+                resident_negative_probes += probes;
+                resident_negative_max = std::max(resident_negative_max, probes);
+            }
+            const auto resident_negative_elapsed{
+                SteadyClock::now() - resident_negative_start};
+
+            LogPrintf("Compact block index: resident-front benchmark positive samples=%u hits=%u time=%d ms probes_avg=%.3f probes_max=%u\n",
+                      samples,
+                      resident_hits,
+                      Ticks<std::chrono::milliseconds>(resident_positive_elapsed),
+                      static_cast<double>(resident_positive_probes) / samples,
+                      resident_positive_max);
+            LogPrintf("Compact block index: resident-front benchmark negative samples=%u misses=%u time=%d ms probes_avg=%.3f probes_max=%u\n",
+                      samples,
+                      resident_misses,
+                      Ticks<std::chrono::milliseconds>(resident_negative_elapsed),
+                      static_cast<double>(resident_negative_probes) / samples,
+                      resident_negative_max);
+        } else {
+            LogPrintf("Compact block index: resident lookup front unavailable: %s\n",
+                      front_error);
+        }
     }
 
     return true;
