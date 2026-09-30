@@ -96,3 +96,27 @@ code reads full block data.
 Oracle startup should be optimized independently by persisting the derived
 price/volatility checkpoint as blocks connect and disconnect, then validating
 and loading that checkpoint on startup with a bounded fallback scan.
+
+
+## Current implementation status
+
+The first shadow-store milestone is implemented.
+
+- Each loaded `CBlockIndex` receives a deterministic 32-bit compact id after
+  sorting by `(height, block hash)`. On 64-bit builds the id consumes existing
+  alignment padding and does not grow the 152-byte balanced shell.
+- `-blockindexcompactshadow=build` writes `blocks/index.compact.tmp`
+  sequentially, fsyncs it, atomically publishes `blocks/index.compact`, then
+  immediately re-opens and verifies every record against the live
+  `CBlockIndex` graph.
+- `-blockindexcompactshadow=verify` verifies an existing shadow independently.
+- The shadow path is disabled by default and is not yet used for normal startup
+  lookup or materialization. Building/verifying it is therefore a migration
+  experiment, not a startup optimization yet.
+- No additional 24-million-entry pointer/id map is allocated while building:
+  parent and skip ids are read from the compact id embedded in each existing
+  shell.
+
+The next milestone is to open this verified representation through a
+file-backed reader, add compact hash-to-id lookup and an active-chain id view,
+then begin replacing historical pointer ownership.
