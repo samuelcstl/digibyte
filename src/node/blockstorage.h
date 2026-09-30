@@ -8,6 +8,7 @@
 #include <chain.h>
 #include <dbwrapper.h>
 #include <kernel/blockmanager_opts.h>
+#include <node/blockindex_compact_lookup.h>
 #include <node/blockindex_compact_store.h>
 #include <kernel/chain.h>
 #include <kernel/chainparams.h>
@@ -369,11 +370,18 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     fs::path CompactBlockIndexShadowPath() const;
+    fs::path CompactBlockIndexLookupPath() const;
     void AssignCompactIdsDeterministic(const std::vector<CBlockIndex*>& sorted)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool OpenCompactBlockIndexMapped()
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool BuildCompactBlockIndexShadow(const std::vector<CBlockIndex*>& sorted)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool VerifyCompactBlockIndexShadow(const std::vector<CBlockIndex*>& sorted)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool BuildCompactBlockIndexLookup()
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool VerifyCompactBlockIndexLookup()
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Return false if block file or undo file flushing fails. */
@@ -489,6 +497,7 @@ public:
 
     BlockIndexStore m_block_index GUARDED_BY(cs_main);
     std::unique_ptr<CompactBlockIndexStore> m_compact_block_index GUARDED_BY(cs_main);
+    std::unique_ptr<CompactBlockIndexLookup> m_compact_block_lookup GUARDED_BY(cs_main);
 
     /**
      * The height of the base block of an assumeutxo snapshot, if one is in use.
