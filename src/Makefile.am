@@ -424,6 +424,7 @@ libdigibyte_node_a_SOURCES = \
   netgroup.cpp \
   node/abort.cpp \
   node/blockmanager_args.cpp \
+  node/blockindex_compact_store.cpp \
   node/blockstorage.cpp \
   node/caches.cpp \
   node/chainstate.cpp \
