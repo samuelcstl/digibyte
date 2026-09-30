@@ -373,6 +373,13 @@ bool BlockManager::OpenCompactBlockIndexMapped()
     return true;
 }
 
+BlockIndexId BlockManager::AllocateCompactId()
+{
+    AssertLockHeld(cs_main);
+    Assert(m_next_compact_id < static_cast<uint64_t>(INVALID_BLOCK_INDEX_ID));
+    return static_cast<BlockIndexId>(m_next_compact_id++);
+}
+
 void BlockManager::AssignCompactIdsDeterministic(const std::vector<CBlockIndex*>& sorted)
 {
     AssertLockHeld(cs_main);
@@ -381,9 +388,10 @@ void BlockManager::AssignCompactIdsDeterministic(const std::vector<CBlockIndex*>
     for (size_t id = 0; id < sorted.size(); ++id) {
         sorted[id]->m_compact_id = static_cast<BlockIndexId>(id);
     }
+    m_next_compact_id = sorted.size();
 
-    LogPrintf("LoadBlockIndex: assigned deterministic compact ids to %u block indices\n",
-              sorted.size());
+    LogPrintf("LoadBlockIndex: assigned deterministic compact ids to %u block indices next=%u\n",
+              sorted.size(), m_next_compact_id);
 }
 
 bool BlockManager::BuildCompactBlockIndexShadow(const std::vector<CBlockIndex*>& sorted)
@@ -586,14 +594,16 @@ bool BlockManager::VerifyCompactBlockIndexShadow(const std::vector<CBlockIndex*>
     }
 
     const uint64_t live_tail{sorted.size() - stored_count};
+    m_next_compact_id = next_id;
     LogPrintf("Compact block index: mapped shadow entries=%u bytes=%u path=%s\n",
               stored_count,
               mapped->SizeBytes(),
               fs::PathToString(path));
-    LogPrintf("Compact block index: verified persisted generation entries=%u live=%u tail=%u in %d ms\n",
+    LogPrintf("Compact block index: verified persisted generation entries=%u live=%u tail=%u next=%u in %d ms\n",
               verified,
               sorted.size(),
               live_tail,
+              m_next_compact_id,
               Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
 
     m_compact_block_index = std::move(mapped);
@@ -877,6 +887,7 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
         return &mi->second;
     }
     CBlockIndex* pindexNew = &(*mi).second;
+    pindexNew->m_compact_id = AllocateCompactId();
 
     // We assign the sequence id to blocks only when the full data is available,
     // to avoid miners withholding blocks but broadcasting headers, to get a
