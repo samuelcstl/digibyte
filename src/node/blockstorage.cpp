@@ -439,34 +439,21 @@ bool BlockManager::BuildCompactBlockIndexShadow(const std::vector<CBlockIndex*>&
     return true;
 }
 
-bool BlockManager::VerifyCompactBlockIndexShadow(const std::vector<CBlockIndex*>& sorted) const
+bool BlockManager::VerifyCompactBlockIndexShadow(const std::vector<CBlockIndex*>& sorted)
 {
     AssertLockHeld(cs_main);
 
     const fs::path path{CompactBlockIndexShadowPath()};
-    FILE* file{fsbridge::fopen(path, "rb")};
-    if (!file) {
-        return error("%s: cannot open compact shadow %s",
-                     __func__, fs::PathToString(path));
+    auto mapped = std::make_unique<CompactBlockIndexStore>();
+    std::string open_error;
+    if (!mapped->Open(path, GetConsensus().hashGenesisBlock, open_error)) {
+        return error("%s: failed to map compact shadow %s: %s",
+                     __func__, fs::PathToString(path), open_error);
     }
 
-    auto fail = [&](const char* reason) {
-        std::fclose(file);
-        file = nullptr;
-        return error("%s: %s", __func__, reason);
-    };
-
-    CompactBlockIndexFileHeader header;
-    if (std::fread(&header, sizeof(header), 1, file) != 1) {
-        return fail("failed to read compact shadow header");
-    }
-
-    if (header.magic != COMPACT_BLOCK_INDEX_MAGIC ||
-        header.version != COMPACT_BLOCK_INDEX_FORMAT_VERSION ||
-        header.entry_size != sizeof(CompactBlockIndexEntry) ||
-        header.entry_count != sorted.size() ||
-        header.genesis_hash != GetConsensus().hashGenesisBlock) {
-        return fail("compact shadow header mismatch");
+    if (mapped->EntryCount() != sorted.size()) {
+        return error("%s: compact shadow entry count mismatch: file=%u live=%u",
+                     __func__, mapped->EntryCount(), sorted.size());
     }
 
     const auto start{SteadyClock::now()};
@@ -475,12 +462,12 @@ bool BlockManager::VerifyCompactBlockIndexShadow(const std::vector<CBlockIndex*>
 
     for (const CBlockIndex* index : sorted) {
         if (m_interrupt) {
-            return fail("interrupted while verifying compact shadow");
+            return error("%s: interrupted while verifying compact shadow", __func__);
         }
 
-        CompactBlockIndexEntry entry;
-        if (std::fread(&entry, sizeof(entry), 1, file) != 1) {
-            return fail("short read in compact shadow");
+        const CompactBlockIndexEntry* entry{mapped->Get(index->m_compact_id)};
+        if (!entry) {
+            return error("%s: compact shadow missing id=%u", __func__, index->m_compact_id);
         }
 
         const BlockIndexId parent_id{
@@ -488,40 +475,35 @@ bool BlockManager::VerifyCompactBlockIndexShadow(const std::vector<CBlockIndex*>
         const BlockIndexId skip_id{
             index->pskip ? index->pskip->m_compact_id : INVALID_BLOCK_INDEX_ID};
 
-        if (entry.hash != index->GetBlockHash() ||
-            !entry.record.MatchesBlockIndex(*index, parent_id, skip_id)) {
+        if (entry->hash != index->GetBlockHash() ||
+            !entry->record.MatchesBlockIndex(*index, parent_id, skip_id)) {
             LogPrintf("Compact block index: mismatch at id=%u height=%d hash=%s\n",
                       index->m_compact_id,
                       index->nHeight,
                       index->GetBlockHash().ToString());
-            return fail("compact shadow record mismatch");
+            return error("%s: compact shadow record mismatch", __func__);
         }
 
         ++verified;
         if (!sorted.empty()) {
             const int percent{static_cast<int>((100 * verified) / sorted.size())};
             if (percent != last_percent && percent % 10 == 0) {
-                LogPrintf("Compact block index: shadow verify %d%%\n", percent);
+                LogPrintf("Compact block index: mapped verify %d%%\n", percent);
                 last_percent = percent;
             }
         }
     }
 
-    const int trailing{std::fgetc(file)};
-    if (trailing != EOF) {
-        return fail("compact shadow contains trailing data");
-    }
-
-    if (std::fclose(file) != 0) {
-        file = nullptr;
-        return error("%s: failed to close compact shadow", __func__);
-    }
-    file = nullptr;
-
+    LogPrintf("Compact block index: mapped shadow entries=%u bytes=%u path=%s\n",
+              mapped->EntryCount(),
+              mapped->SizeBytes(),
+              fs::PathToString(path));
     LogPrintf("Compact block index: verified shadow entries=%u path=%s in %d ms\n",
               verified,
               fs::PathToString(path),
               Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
+
+    m_compact_block_index = std::move(mapped);
     return true;
 }
 
