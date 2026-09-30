@@ -42,8 +42,15 @@ std::string CBlockIndex::ToString() const
 void CChain::SetTip(CBlockIndex& block) {
     CBlockIndex* pindex = &block;
     vChain.resize(pindex->nHeight + 1);
-    while (pindex && vChain[pindex->nHeight] != pindex) {
+    vChainCompactIds.resize(
+        pindex->nHeight + 1,
+        std::numeric_limits<uint32_t>::max());
+
+    while (pindex &&
+           (vChain[pindex->nHeight] != pindex ||
+            vChainCompactIds[pindex->nHeight] != pindex->m_compact_id)) {
         vChain[pindex->nHeight] = pindex;
+        vChainCompactIds[pindex->nHeight] = pindex->m_compact_id;
         pindex = pindex->pprev;
     }
 }
