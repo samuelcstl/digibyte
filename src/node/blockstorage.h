@@ -369,6 +369,8 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     fs::path CompactBlockIndexShadowPath() const;
+    void AssignCompactIdsDeterministic(const std::vector<CBlockIndex*>& sorted)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool BuildCompactBlockIndexShadow(const std::vector<CBlockIndex*>& sorted)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool VerifyCompactBlockIndexShadow(const std::vector<CBlockIndex*>& sorted)
