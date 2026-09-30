@@ -275,8 +275,10 @@ bool CompactBlockIndexLookup::Open(
 
 std::optional<BlockIndexId> CompactBlockIndexLookup::Find(
     const uint256& hash,
-    const CompactBlockIndexStore& source) const noexcept
+    const CompactBlockIndexStore& source,
+    uint32_t* probes) const noexcept
 {
+    if (probes) *probes = 0;
     if (!m_header || !m_slots || !source.IsOpen()) return std::nullopt;
 
     const uint64_t fp{Fingerprint(m_header->k0, m_header->k1, hash)};
@@ -284,6 +286,8 @@ std::optional<BlockIndexId> CompactBlockIndexLookup::Find(
     uint64_t pos{fp & mask};
 
     for (uint64_t probe = 0; probe < m_header->slot_count; ++probe) {
+        if (probes) *probes = static_cast<uint32_t>(probe + 1);
+
         const CompactBlockIndexLookupSlot& slot{m_slots[pos]};
         if (slot.id == INVALID_BLOCK_INDEX_ID) {
             return std::nullopt;
