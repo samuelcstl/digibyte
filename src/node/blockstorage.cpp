@@ -6,6 +6,7 @@
 #include <chain.h>
 #include <clientversion.h>
 #include <consensus/validation.h>
+#include <crypto/common.h>
 #include <dbwrapper.h>
 #include <flatfile.h>
 #include <hash.h>
@@ -699,6 +700,8 @@ bool BlockManager::VerifyCompactBlockIndexLookup()
     if (samples > 0) {
         uint64_t legacy_hits{0};
         uint64_t compact_hits{0};
+        uint64_t positive_probes{0};
+        uint32_t positive_max_probes{0};
 
         const auto legacy_start{SteadyClock::now()};
         for (uint64_t sample = 0; sample < samples; ++sample) {
@@ -712,18 +715,76 @@ bool BlockManager::VerifyCompactBlockIndexLookup()
         for (uint64_t sample = 0; sample < samples; ++sample) {
             const BlockIndexId id{static_cast<BlockIndexId>((sample * count) / samples)};
             const CompactBlockIndexEntry* entry{m_compact_block_index->Get(id)};
+            uint32_t probes{0};
             const auto found{m_compact_block_lookup->Find(
-                entry->hash, *m_compact_block_index)};
+                entry->hash, *m_compact_block_index, &probes)};
             compact_hits += found && *found == id;
+            positive_probes += probes;
+            positive_max_probes = std::max(positive_max_probes, probes);
         }
         const auto compact_elapsed{SteadyClock::now() - compact_start};
 
-        LogPrintf("Compact block index: lookup benchmark positive samples=%u legacy_hits=%u legacy=%d ms compact_hits=%u compact=%d ms\n",
+        LogPrintf("Compact block index: lookup benchmark positive samples=%u legacy_hits=%u legacy=%d ms compact_hits=%u compact=%d ms probes_avg=%.3f probes_max=%u\n",
                   samples,
                   legacy_hits,
                   Ticks<std::chrono::milliseconds>(legacy_elapsed),
                   compact_hits,
-                  Ticks<std::chrono::milliseconds>(compact_elapsed));
+                  Ticks<std::chrono::milliseconds>(compact_elapsed),
+                  static_cast<double>(positive_probes) / samples,
+                  positive_max_probes);
+
+        // Exercise the network-facing miss shape separately. Generate a stable
+        // set of hashes that the legacy map proves are absent, then time both
+        // implementations against exactly the same miss set.
+        std::vector<uint256> negative_hashes;
+        negative_hashes.reserve(samples);
+        for (uint64_t nonce = 1; negative_hashes.size() < samples; ++nonce) {
+            uint256 candidate;
+            uint64_t x{nonce};
+            for (size_t word = 0; word < 4; ++word) {
+                // SplitMix64-style diffusion gives SipHash a well-spread set
+                // without putting RNG/string construction in the timed loops.
+                x += 0x9e3779b97f4a7c15ULL;
+                uint64_t z{x};
+                z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+                z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+                z ^= z >> 31;
+                WriteLE64(candidate.data() + word * 8, z);
+            }
+            if (m_block_index.find(candidate) == m_block_index.end()) {
+                negative_hashes.push_back(candidate);
+            }
+        }
+
+        uint64_t legacy_misses{0};
+        const auto legacy_negative_start{SteadyClock::now()};
+        for (const uint256& hash : negative_hashes) {
+            legacy_misses += m_block_index.find(hash) == m_block_index.end();
+        }
+        const auto legacy_negative_elapsed{SteadyClock::now() - legacy_negative_start};
+
+        uint64_t compact_misses{0};
+        uint64_t negative_probes{0};
+        uint32_t negative_max_probes{0};
+        const auto compact_negative_start{SteadyClock::now()};
+        for (const uint256& hash : negative_hashes) {
+            uint32_t probes{0};
+            const auto found{m_compact_block_lookup->Find(
+                hash, *m_compact_block_index, &probes)};
+            compact_misses += !found;
+            negative_probes += probes;
+            negative_max_probes = std::max(negative_max_probes, probes);
+        }
+        const auto compact_negative_elapsed{SteadyClock::now() - compact_negative_start};
+
+        LogPrintf("Compact block index: lookup benchmark negative samples=%u legacy_misses=%u legacy=%d ms compact_misses=%u compact=%d ms probes_avg=%.3f probes_max=%u\n",
+                  samples,
+                  legacy_misses,
+                  Ticks<std::chrono::milliseconds>(legacy_negative_elapsed),
+                  compact_misses,
+                  Ticks<std::chrono::milliseconds>(compact_negative_elapsed),
+                  static_cast<double>(negative_probes) / samples,
+                  negative_max_probes);
     }
 
     return true;
