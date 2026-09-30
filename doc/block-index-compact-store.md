@@ -254,11 +254,14 @@ Measured immediately after lookup verification:
 - one million resident-front negative lookups took 189 ms, averaging 7.069
   probes with a maximum of 247.
 
+The tightened follow-up, with the lookup key/mask/slot-count copied into the
+resident front, measured one million resident-front negative lookups in 193 ms
+with the same 7.069 average / 247 maximum probe depth and
+`backing_touches=0`. This directly confirms that the benchmark miss path does
+not dereference the mmap-backed slot table or compact record store.
+
 This keeps the miss-side probe work on a compact anonymous surface while exact
-ids and full hashes remain file-backed. A follow-up tightens the implementation
-so even the lookup header/key/slot-count state is copied into the resident
-front; instrumentation reports whether any negative lookup reaches mapped
-backing state.
+ids and full hashes remain file-backed.
 
 Cold/page-cache-eviction behavior and memory-pressure behavior still need
 measurement before selecting the final split/residency policy.
