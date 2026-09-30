@@ -320,6 +320,25 @@ std::vector<CBlockIndex*> BlockManager::GetAllBlockIndices()
     return rv;
 }
 
+std::vector<CBlockIndex*> BlockManager::GetAllBlockIndicesByCompactId()
+{
+    AssertLockHeld(cs_main);
+
+    std::vector<CBlockIndex*> ordered(m_block_index.size(), nullptr);
+    for (auto& [_, block_index] : m_block_index) {
+        const BlockIndexId id{block_index.m_compact_id};
+        Assert(id != INVALID_BLOCK_INDEX_ID);
+        Assert(static_cast<size_t>(id) < ordered.size());
+        Assert(ordered[id] == nullptr);
+        ordered[id] = &block_index;
+    }
+
+    for (CBlockIndex* index : ordered) {
+        Assert(index != nullptr);
+    }
+    return ordered;
+}
+
 fs::path BlockManager::CompactBlockIndexShadowPath() const
 {
     return m_opts.blocks_dir / "index.compact";
