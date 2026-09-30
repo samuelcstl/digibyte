@@ -200,4 +200,55 @@ BOOST_AUTO_TEST_CASE(blockmanager_flush_block_file)
     BOOST_CHECK_EQUAL(read_block.nVersion, 2);
 }
 
+
+BOOST_AUTO_TEST_CASE(blockmanager_live_compact_ids_and_chain_mirror)
+{
+    const auto params{CreateChainParams(ArgsManager{}, ChainType::MAIN)};
+    KernelNotifications notifications{m_node.exit_status};
+    const BlockManager::Options blockman_opts{
+        .chainparams = *params,
+        .blocks_dir = m_args.GetBlocksDirPath(),
+        .notifications = notifications,
+    };
+    BlockManager blockman{m_node.kernel->interrupt, blockman_opts};
+
+    LOCK(::cs_main);
+
+    CBlockIndex* best_header{nullptr};
+    CBlockHeader genesis_header{params->GenesisBlock()};
+    CBlockIndex* genesis{blockman.AddToBlockIndex(genesis_header, best_header)};
+    BOOST_REQUIRE(genesis);
+    BOOST_CHECK_EQUAL(genesis->m_compact_id, 0U);
+
+    CBlockHeader child_header{genesis_header};
+    child_header.hashPrevBlock = genesis->GetBlockHash();
+    ++child_header.nTime;
+    ++child_header.nNonce;
+    CBlockIndex* child{blockman.AddToBlockIndex(child_header, best_header)};
+    BOOST_REQUIRE(child);
+    BOOST_CHECK_EQUAL(child->m_compact_id, 1U);
+
+    CBlockHeader fork_header{child_header};
+    fork_header.hashPrevBlock = genesis->GetBlockHash();
+    ++fork_header.nNonce;
+    CBlockIndex* fork{blockman.AddToBlockIndex(fork_header, best_header)};
+    BOOST_REQUIRE(fork);
+    BOOST_CHECK_EQUAL(fork->m_compact_id, 2U);
+
+    CChain chain;
+    chain.SetTip(*child);
+    BOOST_CHECK_EQUAL(chain.CompactIdCount(), 2U);
+    BOOST_CHECK_EQUAL(chain.CompactIdAt(0), 0U);
+    BOOST_CHECK_EQUAL(chain.CompactIdAt(1), 1U);
+    BOOST_CHECK(chain.CompactIdsComplete());
+    BOOST_CHECK(chain.CompactIdMirrorMatchesPointers());
+
+    chain.SetTip(*fork);
+    BOOST_CHECK_EQUAL(chain.CompactIdCount(), 2U);
+    BOOST_CHECK_EQUAL(chain.CompactIdAt(0), 0U);
+    BOOST_CHECK_EQUAL(chain.CompactIdAt(1), 2U);
+    BOOST_CHECK(chain.CompactIdsComplete());
+    BOOST_CHECK(chain.CompactIdMirrorMatchesPointers());
+}
+
 BOOST_AUTO_TEST_SUITE_END()
