@@ -63,6 +63,18 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, BlockManager::Op
         }
     }
 
+    if (auto value{args.GetArg("-blockindexcompactlookup")}) {
+        if (*value == "off") {
+            opts.block_index_compact_lookup = kernel::BlockIndexCompactLookupMode::OFF;
+        } else if (*value == "build") {
+            opts.block_index_compact_lookup = kernel::BlockIndexCompactLookupMode::BUILD;
+        } else if (*value == "verify") {
+            opts.block_index_compact_lookup = kernel::BlockIndexCompactLookupMode::VERIFY;
+        } else {
+            return util::Error{strprintf(Untranslated("Invalid -blockindexcompactlookup=%s (expected off, build, or verify)"), *value)};
+        }
+    }
+
     return {};
 }
 } // namespace node
