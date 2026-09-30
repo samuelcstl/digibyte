@@ -367,6 +367,12 @@ private:
     bool LoadBlockIndex(const std::optional<uint256>& snapshot_blockhash)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    fs::path CompactBlockIndexShadowPath() const;
+    bool BuildCompactBlockIndexShadow(const std::vector<CBlockIndex*>& sorted)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool VerifyCompactBlockIndexShadow(const std::vector<CBlockIndex*>& sorted) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
     /** Return false if block file or undo file flushing fails. */
     [[nodiscard]] bool FlushBlockFile(int blockfile_num, bool fFinalize, bool finalize_undo);
 
