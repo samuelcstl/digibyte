@@ -128,7 +128,9 @@ struct CompactBlockIndexFileHeader
     uint256 genesis_hash{};
     uint256 best_hash{};
     uint64_t generation{0};
-    uint64_t reserved[3]{};
+    uint64_t lookup_capacity{0};
+    uint64_t lookup_k0{0};
+    uint64_t lookup_k1{0};
 };
 
 static_assert(std::is_standard_layout_v<CompactBlockIndexFileHeader>);
