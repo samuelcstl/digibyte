@@ -760,7 +760,10 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
     const auto sort_start{SteadyClock::now()};
     LogPrintf("LoadBlockIndex: Sorting %d block indices by height...", vSortedByHeight.size());
     std::sort(vSortedByHeight.begin(), vSortedByHeight.end(),
-              CBlockIndexHeightOnlyComparator());
+              [](const CBlockIndex* a, const CBlockIndex* b) {
+                  if (a->nHeight != b->nHeight) return a->nHeight < b->nHeight;
+                  return a->GetBlockHash() < b->GetBlockHash();
+              });
     LogPrintf("Startup timing: first block-index height sort: %d entries in %d ms\n",
               vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - sort_start));
 
@@ -894,6 +897,7 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
         break;
     case kernel::BlockIndexCompactShadowMode::BUILD:
         if (!BuildCompactBlockIndexShadow(vSortedByHeight)) return false;
+        if (!VerifyCompactBlockIndexShadow(vSortedByHeight)) return false;
         break;
     case kernel::BlockIndexCompactShadowMode::VERIFY:
         if (!VerifyCompactBlockIndexShadow(vSortedByHeight)) return false;
