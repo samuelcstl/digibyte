@@ -149,3 +149,26 @@ its derived price/volatility state is preferable to making the 172,800-block
 reconstruction scan multithreaded. If a bounded fallback scan remains after
 checkpointing, that fallback can then be evaluated separately for safe
 parallel I/O/validation.
+
+
+## Persistent hash lookup experiment
+
+A debug-only persistent `hash -> BlockIndexId` lookup now complements the
+mapped compact store.
+
+- `-blockindexcompactlookup=build` builds
+  `blocks/index.compact.lookup` from the existing compact generation, reopens
+  it read-only, verifies every persisted entry, and benchmarks sampled positive
+  lookups against the legacy `unordered_map<uint256, CBlockIndex>`.
+- `-blockindexcompactlookup=verify` reopens and verifies an existing lookup.
+- The table uses power-of-two open addressing at no more than 75% load.
+  At roughly 24.3 million records this is 33,554,432 16-byte slots, about
+  512 MiB of file-backed storage.
+- Each slot stores a keyed 64-bit SipHash fingerprint plus a 32-bit
+  `BlockIndexId`. Fingerprint matches are always verified against the full
+  authoritative 256-bit hash in the compact mapped record.
+- The lookup is a derived cache tied to the compact source generation and size;
+  failure to build or open it is non-fatal.
+- Normal block-index lookup is not switched to this table yet. The first goal is
+  to establish correctness, lookup latency, and file-backed residency before
+  replacing the legacy historical map.
