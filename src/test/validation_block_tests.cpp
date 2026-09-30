@@ -195,6 +195,20 @@ BOOST_AUTO_TEST_CASE(compact_block_index_persistent_lookup)
     }
 
     BOOST_CHECK(!lookup.Find(uint256S("deadbeef"), store).has_value());
+
+    BOOST_REQUIRE_MESSAGE(
+        lookup.LoadResidentProbeFront(error),
+        "failed to load resident compact lookup front: " << error);
+    BOOST_CHECK(lookup.HasResidentProbeFront());
+    BOOST_CHECK(lookup.ResidentProbeFrontBytes() > 0U);
+
+    for (BlockIndexId id = 0; id < entries.size(); ++id) {
+        const auto found{lookup.FindResident(entries[id].hash, store)};
+        BOOST_REQUIRE(found.has_value());
+        BOOST_CHECK_EQUAL(*found, id);
+    }
+
+    BOOST_CHECK(!lookup.FindResident(uint256S("deadbeef"), store).has_value());
 }
 
 BOOST_AUTO_TEST_CASE(block_index_store_full_residency_invariants)
