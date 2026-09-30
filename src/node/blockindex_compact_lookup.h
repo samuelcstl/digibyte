@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace boost::interprocess {
 class file_mapping;
@@ -101,6 +102,29 @@ public:
         const CompactBlockIndexStore& source,
         uint32_t* probes = nullptr) const noexcept;
 
+    /**
+     * Copy the keyed fingerprint/occupancy probe surface into anonymous
+     * resident memory. FindResident() can then reject unknown hashes without
+     * touching the mmap-backed slot/id table or compact record store.
+     */
+    bool LoadResidentProbeFront(std::string& error);
+
+    [[nodiscard]] bool HasResidentProbeFront() const noexcept
+    {
+        return !m_resident_fingerprints.empty();
+    }
+
+    [[nodiscard]] uint64_t ResidentProbeFrontBytes() const noexcept
+    {
+        return static_cast<uint64_t>(m_resident_fingerprints.size()) * sizeof(uint64_t) +
+               static_cast<uint64_t>(m_resident_occupancy.size()) * sizeof(uint64_t);
+    }
+
+    [[nodiscard]] std::optional<BlockIndexId> FindResident(
+        const uint256& hash,
+        const CompactBlockIndexStore& source,
+        uint32_t* probes = nullptr) const noexcept;
+
 private:
     fs::path m_path;
     std::unique_ptr<boost::interprocess::file_mapping> m_mapping;
@@ -108,6 +132,11 @@ private:
     const CompactBlockIndexLookupHeader* m_header{nullptr};
     const CompactBlockIndexLookupSlot* m_slots{nullptr};
     uint64_t m_size_bytes{0};
+
+    // Anonymous resident negative-lookup surface. The exact id and full hash
+    // remain file-backed and are touched only after a keyed fingerprint match.
+    std::vector<uint64_t> m_resident_fingerprints;
+    std::vector<uint64_t> m_resident_occupancy;
 };
 
 } // namespace node
