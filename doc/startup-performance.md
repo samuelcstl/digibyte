@@ -1,5 +1,14 @@
 # Startup performance investigation
 
+> **Status note (Generation 2):** this file remains the measurement and
+> experiment ledger for startup work. Some implementations recorded here are
+> intentionally prototypes. In particular, persisted chain work proved the
+> value of persistence but may ultimately be carried by the compact historical
+> record rather than an upstream-incompatible LevelDB extension. Current Gen2
+> architecture, clean-IBD/upstream migration requirements and the inventory of
+> harvested/pending ideas are maintained in
+> `doc/block-index-compact-store.md`.
+
 This document tracks an ongoing investigation into DigiByte Core startup time and
 block-index memory use. It records measurements and hypotheses so that individual
 changes can be reviewed and benchmarked independently.
