@@ -513,6 +513,11 @@ class CChain
 private:
     std::vector<CBlockIndex*> vChain;
 
+    // Generation-2 shadow of vChain. This deliberately coexists with the
+    // pointer vector while the remaining pointer owners are converted.
+    // UINT32_MAX means the pointed-to block does not yet have a compact id.
+    std::vector<uint32_t> vChainCompactIds;
+
 public:
     CChain() = default;
     CChain(const CChain&) = delete;
@@ -557,6 +562,36 @@ public:
     int Height() const
     {
         return int(vChain.size()) - 1;
+    }
+
+    /** Generation-2 active-chain id mirror accessors. */
+    uint32_t CompactIdAt(int nHeight) const
+    {
+        if (nHeight < 0 || nHeight >= (int)vChainCompactIds.size())
+            return std::numeric_limits<uint32_t>::max();
+        return vChainCompactIds[nHeight];
+    }
+
+    size_t CompactIdCount() const { return vChainCompactIds.size(); }
+
+    bool CompactIdMirrorMatchesPointers() const
+    {
+        if (vChainCompactIds.size() != vChain.size()) return false;
+        for (size_t i = 0; i < vChain.size(); ++i) {
+            const CBlockIndex* index{vChain[i]};
+            if (!index || vChainCompactIds[i] != index->m_compact_id) return false;
+        }
+        return true;
+    }
+
+    bool CompactIdsComplete() const
+    {
+        return std::all_of(
+            vChainCompactIds.begin(),
+            vChainCompactIds.end(),
+            [](uint32_t id) {
+                return id != std::numeric_limits<uint32_t>::max();
+            });
     }
 
     /** Set/initialize a chain with a given tip. */
