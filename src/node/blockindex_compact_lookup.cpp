@@ -93,8 +93,10 @@ bool CompactBlockIndexLookup::Build(
                 error = "cannot create compact lookup temp file";
                 return false;
             }
-            if (std::fwrite(&header, sizeof(header), 1, file) != 1 ||
-                std::fclose(file) != 0) {
+            const bool wrote_header{
+                std::fwrite(&header, sizeof(header), 1, file) == 1};
+            const bool closed{std::fclose(file) == 0};
+            if (!wrote_header || !closed) {
                 fs::remove(tmp);
                 error = "failed to write compact lookup header";
                 return false;
