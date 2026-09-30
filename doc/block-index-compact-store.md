@@ -142,6 +142,13 @@ derived lookup header. A remote peer does not know that local key under the
 normal threat model, but the final design must document this explicitly and
 must not rely on secrecy against a local attacker.
 
+Newly learned blocks now receive monotonically increasing compact ids immediately
+in `AddToBlockIndex()`, including clean-IBD/reindex insertion paths. `CChain`
+also maintains a parallel compact-id vector and verifies it against the pointer
+chain at startup. This is still a shadow representation: live/tail ids are not
+yet persisted across restart, so generation/delta persistence is the next
+required step before the id vector can become authoritative.
+
 Normal `LookupBlockIndex()` is still backed by the legacy map. Normal startup
 still performs the LevelDB count pass, deserializes roughly 24.3 million
 records, constructs the first pointer vector, performs the first height sort,
@@ -431,13 +438,15 @@ This section exists specifically to prevent useful experiments from being lost.
 - explicit no-I/O scopes around mining/validation/relay;
 - persisted cumulative chain work;
 - stable 32-bit historical ids;
+- process-live monotonic id allocation for newly learned blocks;
+- active-chain compact-id shadow maintained across tip changes/reorgs;
 - mmap/file-backed compact records;
 - compact exact hash lookup with full-hash verification;
 - reuse compact ordering to eliminate duplicate height sorting.
 
 **Still pending / intended for later**
 
-- active-chain id mirror;
+- persistence of live/tail ids across restart and compact-generation rollover;
 - pointer-owner to id/lease conversion;
 - hot materialization cache and pin accounting;
 - deep-reorg prefetch;
