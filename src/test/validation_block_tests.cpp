@@ -8,6 +8,7 @@
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
 #include <node/blockindex_compact.h>
+#include <node/blockindex_compact_lookup.h>
 #include <node/blockindex_compact_store.h>
 #include <node/miner.h>
 #include <pow.h>
@@ -143,6 +144,55 @@ BOOST_AUTO_TEST_CASE(compact_block_index_mapped_store)
     BOOST_CHECK_EQUAL(got_second->record.parent, 0U);
     BOOST_CHECK(store.Get(node::INVALID_BLOCK_INDEX_ID) == nullptr);
     BOOST_CHECK(store.Get(2) == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(compact_block_index_persistent_lookup)
+{
+    const fs::path compact_path{m_path_root / "compact-index-lookup-source.dat"};
+    const fs::path lookup_path{m_path_root / "compact-index-lookup.dat"};
+
+    node::CompactBlockIndexFileHeader header;
+    header.entry_count = 3;
+    header.generation = 7;
+    header.genesis_hash = Params().GetConsensus().hashGenesisBlock;
+
+    std::array<node::CompactBlockIndexEntry, 3> entries{};
+    entries[0].hash = uint256S("01");
+    entries[1].hash = uint256S("02");
+    entries[2].hash = uint256S("abcdef");
+
+    FILE* file{fsbridge::fopen(compact_path, "wb")};
+    BOOST_REQUIRE(file != nullptr);
+    BOOST_REQUIRE_EQUAL(std::fwrite(&header, sizeof(header), 1, file), 1U);
+    BOOST_REQUIRE_EQUAL(std::fwrite(entries.data(), sizeof(entries[0]), entries.size(), file), entries.size());
+    BOOST_REQUIRE_EQUAL(std::fclose(file), 0);
+
+    node::CompactBlockIndexStore store;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(
+        store.Open(compact_path, header.genesis_hash, error),
+        "failed to open compact lookup source: " << error);
+
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexLookup::Build(lookup_path, store, error),
+        "failed to build compact lookup: " << error);
+
+    node::CompactBlockIndexLookup lookup;
+    BOOST_REQUIRE_MESSAGE(
+        lookup.Open(lookup_path, store, error),
+        "failed to open compact lookup: " << error);
+
+    BOOST_CHECK(lookup.IsOpen());
+    BOOST_CHECK_EQUAL(lookup.EntryCount(), entries.size());
+    BOOST_CHECK(lookup.SlotCount() >= entries.size());
+
+    for (BlockIndexId id = 0; id < entries.size(); ++id) {
+        const auto found{lookup.Find(entries[id].hash, store)};
+        BOOST_REQUIRE(found.has_value());
+        BOOST_CHECK_EQUAL(*found, id);
+    }
+
+    BOOST_CHECK(!lookup.Find(uint256S("deadbeef"), store).has_value());
 }
 
 BOOST_AUTO_TEST_CASE(block_index_store_full_residency_invariants)
