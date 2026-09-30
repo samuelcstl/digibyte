@@ -344,6 +344,19 @@ fs::path BlockManager::CompactBlockIndexShadowPath() const
     return m_opts.blocks_dir / "index.compact";
 }
 
+void BlockManager::AssignCompactIdsDeterministic(const std::vector<CBlockIndex*>& sorted)
+{
+    AssertLockHeld(cs_main);
+    Assert(sorted.size() < static_cast<size_t>(INVALID_BLOCK_INDEX_ID));
+
+    for (size_t id = 0; id < sorted.size(); ++id) {
+        sorted[id]->m_compact_id = static_cast<BlockIndexId>(id);
+    }
+
+    LogPrintf("LoadBlockIndex: assigned deterministic compact ids to %u block indices\n",
+              sorted.size());
+}
+
 bool BlockManager::BuildCompactBlockIndexShadow(const std::vector<CBlockIndex*>& sorted)
 {
     AssertLockHeld(cs_main);
@@ -447,46 +460,95 @@ bool BlockManager::VerifyCompactBlockIndexShadow(const std::vector<CBlockIndex*>
     auto mapped = std::make_unique<CompactBlockIndexStore>();
     std::string open_error;
     if (!mapped->Open(path, GetConsensus().hashGenesisBlock, open_error)) {
-        return error("%s: failed to map compact shadow %s: %s",
-                     __func__, fs::PathToString(path), open_error);
+        LogPrintf("Compact block index: ignoring unusable shadow %s: %s\n",
+                  fs::PathToString(path), open_error);
+        return false;
     }
 
-    if (mapped->EntryCount() != sorted.size()) {
-        return error("%s: compact shadow entry count mismatch: file=%u live=%u",
-                     __func__, mapped->EntryCount(), sorted.size());
+    if (mapped->EntryCount() > sorted.size()) {
+        LogPrintf("Compact block index: ignoring shadow newer/larger than live index: file=%u live=%u\n",
+                  mapped->EntryCount(), sorted.size());
+        return false;
+    }
+
+    for (CBlockIndex* index : sorted) {
+        index->m_compact_id = INVALID_BLOCK_INDEX_ID;
     }
 
     const auto start{SteadyClock::now()};
+    const uint64_t stored_count{mapped->EntryCount()};
+
+    // First restore the ids already published by the compact-store generation.
+    // Lookups still use the legacy in-memory map during this migration stage.
+    for (uint64_t raw_id = 0; raw_id < stored_count; ++raw_id) {
+        if (m_interrupt) {
+            LogPrintf("Compact block index: verification interrupted\n");
+            return false;
+        }
+
+        const BlockIndexId id{static_cast<BlockIndexId>(raw_id)};
+        const CompactBlockIndexEntry* entry{mapped->Get(id)};
+        if (!entry) {
+            LogPrintf("Compact block index: missing mapped entry id=%u\n", id);
+            return false;
+        }
+
+        CBlockIndex* live{LookupBlockIndex(entry->hash)};
+        if (!live) {
+            LogPrintf("Compact block index: shadow id=%u references unknown hash=%s; ignoring shadow\n",
+                      id, entry->hash.ToString());
+            return false;
+        }
+        if (live->m_compact_id != INVALID_BLOCK_INDEX_ID) {
+            LogPrintf("Compact block index: duplicate live hash/id assignment at id=%u hash=%s; ignoring shadow\n",
+                      id, entry->hash.ToString());
+            return false;
+        }
+        live->m_compact_id = id;
+    }
+
+    // Blocks learned since this compact generation are a live tail. Give them
+    // ids after the persisted generation without renumbering historical ids.
+    uint64_t next_id{stored_count};
+    for (CBlockIndex* index : sorted) {
+        if (index->m_compact_id != INVALID_BLOCK_INDEX_ID) continue;
+        if (next_id >= static_cast<uint64_t>(INVALID_BLOCK_INDEX_ID)) {
+            LogPrintf("Compact block index: id space exhausted while assigning live tail\n");
+            return false;
+        }
+        index->m_compact_id = static_cast<BlockIndexId>(next_id++);
+    }
+
     size_t verified{0};
     int last_percent{-1};
 
-    for (const CBlockIndex* index : sorted) {
+    // Now that every live block has an id, compare all persisted records,
+    // including parent and skip references, against reconstructed live state.
+    for (uint64_t raw_id = 0; raw_id < stored_count; ++raw_id) {
         if (m_interrupt) {
-            return error("%s: interrupted while verifying compact shadow", __func__);
+            LogPrintf("Compact block index: verification interrupted\n");
+            return false;
         }
 
-        const CompactBlockIndexEntry* entry{mapped->Get(index->m_compact_id)};
-        if (!entry) {
-            return error("%s: compact shadow missing id=%u", __func__, index->m_compact_id);
-        }
+        const BlockIndexId id{static_cast<BlockIndexId>(raw_id)};
+        const CompactBlockIndexEntry* entry{mapped->Get(id)};
+        CBlockIndex* index{LookupBlockIndex(entry->hash)};
+        Assert(index != nullptr);
 
         const BlockIndexId parent_id{
             index->pprev ? index->pprev->m_compact_id : INVALID_BLOCK_INDEX_ID};
         const BlockIndexId skip_id{
             index->pskip ? index->pskip->m_compact_id : INVALID_BLOCK_INDEX_ID};
 
-        if (entry->hash != index->GetBlockHash() ||
-            !entry->record.MatchesBlockIndex(*index, parent_id, skip_id)) {
-            LogPrintf("Compact block index: mismatch at id=%u height=%d hash=%s\n",
-                      index->m_compact_id,
-                      index->nHeight,
-                      index->GetBlockHash().ToString());
-            return error("%s: compact shadow record mismatch", __func__);
+        if (!entry->record.MatchesBlockIndex(*index, parent_id, skip_id)) {
+            LogPrintf("Compact block index: mismatch at persisted id=%u height=%d hash=%s; ignoring shadow\n",
+                      id, index->nHeight, index->GetBlockHash().ToString());
+            return false;
         }
 
         ++verified;
-        if (!sorted.empty()) {
-            const int percent{static_cast<int>((100 * verified) / sorted.size())};
+        if (stored_count > 0) {
+            const int percent{static_cast<int>((100 * verified) / stored_count)};
             if (percent != last_percent && percent % 10 == 0) {
                 LogPrintf("Compact block index: mapped verify %d%%\n", percent);
                 last_percent = percent;
@@ -494,13 +556,15 @@ bool BlockManager::VerifyCompactBlockIndexShadow(const std::vector<CBlockIndex*>
         }
     }
 
+    const uint64_t live_tail{sorted.size() - stored_count};
     LogPrintf("Compact block index: mapped shadow entries=%u bytes=%u path=%s\n",
-              mapped->EntryCount(),
+              stored_count,
               mapped->SizeBytes(),
               fs::PathToString(path));
-    LogPrintf("Compact block index: verified shadow entries=%u path=%s in %d ms\n",
+    LogPrintf("Compact block index: verified persisted generation entries=%u live=%u tail=%u in %d ms\n",
               verified,
-              fs::PathToString(path),
+              sorted.size(),
+              live_tail,
               Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
 
     m_compact_block_index = std::move(mapped);
@@ -771,12 +835,6 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
     if (vSortedByHeight.size() >= static_cast<size_t>(INVALID_BLOCK_INDEX_ID)) {
         return error("%s: compact block-index id space exhausted", __func__);
     }
-    for (size_t id = 0; id < vSortedByHeight.size(); ++id) {
-        vSortedByHeight[id]->m_compact_id = static_cast<BlockIndexId>(id);
-    }
-
-    LogPrintf("LoadBlockIndex: assigned compact ids to %u block indices\n",
-              vSortedByHeight.size());
     LogPrintf("LoadBlockIndex: Sort complete, processing blocks...");
     const auto process_start{SteadyClock::now()};
 
@@ -895,13 +953,23 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
 
     switch (m_opts.block_index_compact_shadow) {
     case kernel::BlockIndexCompactShadowMode::OFF:
+        AssignCompactIdsDeterministic(vSortedByHeight);
         break;
     case kernel::BlockIndexCompactShadowMode::BUILD:
-        if (!BuildCompactBlockIndexShadow(vSortedByHeight)) return false;
-        if (!VerifyCompactBlockIndexShadow(vSortedByHeight)) return false;
+        AssignCompactIdsDeterministic(vSortedByHeight);
+        if (!BuildCompactBlockIndexShadow(vSortedByHeight) ||
+            !VerifyCompactBlockIndexShadow(vSortedByHeight)) {
+            LogPrintf("Compact block index: shadow build/verify failed; continuing with legacy block index\n");
+            AssignCompactIdsDeterministic(vSortedByHeight);
+            m_compact_block_index.reset();
+        }
         break;
     case kernel::BlockIndexCompactShadowMode::VERIFY:
-        if (!VerifyCompactBlockIndexShadow(vSortedByHeight)) return false;
+        if (!VerifyCompactBlockIndexShadow(vSortedByHeight)) {
+            LogPrintf("Compact block index: shadow unavailable or incompatible; continuing with legacy block index\n");
+            AssignCompactIdsDeterministic(vSortedByHeight);
+            m_compact_block_index.reset();
+        }
         break;
     }
 
