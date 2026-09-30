@@ -51,6 +51,18 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, BlockManager::Op
         opts.block_index_hot_depth = static_cast<size_t>(*value);
     }
 
+    if (auto value{args.GetArg("-blockindexcompactshadow")}) {
+        if (*value == "off") {
+            opts.block_index_compact_shadow = kernel::BlockIndexCompactShadowMode::OFF;
+        } else if (*value == "build") {
+            opts.block_index_compact_shadow = kernel::BlockIndexCompactShadowMode::BUILD;
+        } else if (*value == "verify") {
+            opts.block_index_compact_shadow = kernel::BlockIndexCompactShadowMode::VERIFY;
+        } else {
+            return util::Error{strprintf(Untranslated("Invalid -blockindexcompactshadow=%s (expected off, build, or verify)"), *value)};
+        }
+    }
+
     return {};
 }
 } // namespace node
