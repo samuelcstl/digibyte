@@ -816,14 +816,17 @@ bool BlockManager::VerifyCompactBlockIndexLookup()
 
             uint64_t resident_misses{0};
             uint64_t resident_negative_probes{0};
+            uint64_t resident_negative_backing_touches{0};
             uint32_t resident_negative_max{0};
             const auto resident_negative_start{SteadyClock::now()};
             for (const uint256& hash : negative_hashes) {
                 uint32_t probes{0};
+                bool touched_backing{false};
                 const auto found{m_compact_block_lookup->FindResident(
-                    hash, *m_compact_block_index, &probes)};
+                    hash, *m_compact_block_index, &probes, &touched_backing)};
                 resident_misses += !found;
                 resident_negative_probes += probes;
+                resident_negative_backing_touches += touched_backing;
                 resident_negative_max = std::max(resident_negative_max, probes);
             }
             const auto resident_negative_elapsed{
@@ -835,12 +838,13 @@ bool BlockManager::VerifyCompactBlockIndexLookup()
                       Ticks<std::chrono::milliseconds>(resident_positive_elapsed),
                       static_cast<double>(resident_positive_probes) / samples,
                       resident_positive_max);
-            LogPrintf("Compact block index: resident-front benchmark negative samples=%u misses=%u time=%d ms probes_avg=%.3f probes_max=%u\n",
+            LogPrintf("Compact block index: resident-front benchmark negative samples=%u misses=%u time=%d ms probes_avg=%.3f probes_max=%u backing_touches=%u\n",
                       samples,
                       resident_misses,
                       Ticks<std::chrono::milliseconds>(resident_negative_elapsed),
                       static_cast<double>(resident_negative_probes) / samples,
-                      resident_negative_max);
+                      resident_negative_max,
+                      resident_negative_backing_touches);
         } else {
             LogPrintf("Compact block index: resident lookup front unavailable: %s\n",
                       front_error);
