@@ -203,12 +203,24 @@ compact store.
   authoritative 256-bit hash in the compact mapped record.
 - The lookup is a derived cache tied to the compact source generation and size;
   failure to build or open it is non-fatal.
-- The first full-mainnet build completed in about 9.3 s and full verification
-  in about 4.9 s. A warm one-million-positive-lookup benchmark measured
-  397 ms for the legacy map and 214 ms for the compact lookup.
-- That positive benchmark is encouraging but insufficient for network-path
-  adoption because the build/verify pass had already faulted the mapped files
-  into memory.
+- The first full-mainnet build completed in about 9.3 s. Full verification
+  measured 4.9 s in the first build run and 10.0 s in a later verify-only run,
+  illustrating the sensitivity of these full scans to cache/storage state.
+- In the later probe-instrumented run, one million sampled positive lookups
+  measured 1,706 ms through the legacy map and 418 ms through the compact
+  lookup. Successful compact lookups averaged 2.315 probes with a maximum of
+  168.
+- One million proven-absent hashes measured 258 ms through the legacy map and
+  244 ms through the compact lookup. Compact misses averaged 7.069 probes with
+  a maximum of 247.
+- Those probe counts are consistent with the expected behavior of linear
+  probing near the table's ~72.4% occupancy and show no evidence of a table
+  pathology. The timings remain warm-mapping measurements because full lookup
+  verification had just touched the mapped table and source records.
+- These results make the compact exact lookup CPU-competitive, and often
+  substantially faster than the legacy unordered map, but are still
+  insufficient for network-path adoption because they do not demonstrate
+  behavior after page-cache eviction or under memory pressure.
 
 Before routing arbitrary network hashes through the compact lookup, measure
 negative-lookup cost and page-fault behavior under cold and reclaim-pressure
@@ -216,13 +228,23 @@ conditions. The original invariant remains stronger than "mmap is usually
 fast": an untrusted peer must not be able to turn arbitrary unknown hashes into
 serialized random storage I/O while `cs_main` is held.
 
-One likely final shape is a small genuinely resident negative-membership layer
-(Bloom/Xor/cuckoo-style filter or equivalent) in front of the exact mapped
-lookup. Unknown peer hashes would die in resident memory; positives and rare
-false positives could continue to the exact keyed lookup and full-hash
-verification. An alternative is to keep the exact fingerprint/id table itself
-resident if its measured memory cost is acceptable. The choice should be made
-from measured miss rates, page faults, memory pressure and live P2P latency.
+The measured miss path strengthens the case for a genuinely resident keyed
+fingerprint front in front of the exact mapped lookup. The current interleaved
+table is 16 bytes per slot, but an 8-byte fingerprint array for all 2^25 slots
+would be 256 MiB, plus only a few MiB for exact occupancy metadata. Unknown
+peer hashes could then probe exclusively resident memory. Only a keyed
+fingerprint match would touch the mapped id/full-hash backing data.
+
+This is preferable to a probabilistic Bloom-only front if the goal is to avoid
+peer-controllable storage reads: a Bloom false positive is expected by design,
+whereas a keyed 64-bit fingerprint collision is computationally infeasible for
+a remote peer that does not know the local key. Full 256-bit verification still
+remains mandatory before returning a positive result. If the threat model
+requires still more margin, two independent keyed fingerprints can be
+evaluated against the extra resident-memory cost.
+
+Cold/page-cache-eviction behavior still needs measurement before selecting the
+final split/residency policy.
 
 ## Compatibility, clean IBD, migration and recovery
 
