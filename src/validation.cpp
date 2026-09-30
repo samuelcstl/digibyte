@@ -5313,6 +5313,16 @@ bool Chainstate::LoadChainTip()
     }
     m_chain.SetTip(*pindex);
 
+    Assert(m_chain.CompactIdMirrorMatchesPointers());
+    if (m_chain.CompactIdsComplete()) {
+        LogPrintf("Block-index compact active-chain mirror: entries=%u tip_id=%u complete=1\n",
+                  m_chain.CompactIdCount(),
+                  m_chain.CompactIdAt(m_chain.Height()));
+    } else {
+        LogPrintf("Block-index compact active-chain mirror: entries=%u complete=0\n",
+                  m_chain.CompactIdCount());
+    }
+
     const size_t algo_warmed{m_blockman.m_block_index.PrewarmAlgoHistory(m_chain.Tip())};
     LogPrintf("Block-index residency: mode=%s hotdepth=%u algo_payloads=%u prewarmed=%u\n",
               node::BlockIndexStore::ModeName(m_blockman.m_block_index.GetMode()),
