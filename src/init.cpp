@@ -479,6 +479,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-blockindexmode=<mode>", "Block-index residency policy: full, balanced, or lowmem (default: full)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-blockindexhotdepth=<n>", strprintf("Number of active-chain block indexes whose derived hot payload is prewarmed in balanced/lowmem mode (default: %u)", kernel::DEFAULT_BLOCK_INDEX_HOT_DEPTH), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-blockindexcompactshadow=<mode>", "Compact historical block-index shadow store: off, build, or verify (default: off)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-blockindexcompactlookup=<mode>", "Compact historical block-index hash lookup: off, build, or verify (default: off)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
 #if HAVE_SYSTEM
     argsman.AddArg("-blocknotify=<cmd>", "Execute command when the best block changes (%s in cmd is replaced by block hash)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #endif
