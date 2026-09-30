@@ -5608,15 +5608,9 @@ bool ChainstateManager::LoadBlockIndex()
         m_blockman.ScanAndUnlinkAlreadyPrunedFiles();
 
         const auto collect_start{SteadyClock::now()};
-        std::vector<CBlockIndex*> vSortedByHeight{m_blockman.GetAllBlockIndices()};
-        LogPrintf("Startup timing: second block-index vector: %d entries in %d ms\n",
+        std::vector<CBlockIndex*> vSortedByHeight{m_blockman.GetAllBlockIndicesByCompactId()};
+        LogPrintf("Startup timing: second block-index compact-id view: %d entries in %d ms\n",
                   vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - collect_start));
-
-        const auto sort_start{SteadyClock::now()};
-        std::sort(vSortedByHeight.begin(), vSortedByHeight.end(),
-                  CBlockIndexHeightOnlyComparator());
-        LogPrintf("Startup timing: second block-index height sort: %d entries in %d ms\n",
-                  vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - sort_start));
 
         const auto candidates_start{SteadyClock::now()};
         for (CBlockIndex* pindex : vSortedByHeight) {
