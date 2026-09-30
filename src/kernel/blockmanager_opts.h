@@ -27,6 +27,12 @@ enum class BlockIndexCompactShadowMode {
     VERIFY,
 };
 
+enum class BlockIndexCompactLookupMode {
+    OFF,
+    BUILD,
+    VERIFY,
+};
+
 static constexpr size_t DEFAULT_BLOCK_INDEX_HOT_DEPTH{40320};
 
 /**
@@ -40,6 +46,7 @@ struct BlockManagerOpts {
     BlockIndexResidencyMode block_index_mode{BlockIndexResidencyMode::FULL};
     size_t block_index_hot_depth{DEFAULT_BLOCK_INDEX_HOT_DEPTH};
     BlockIndexCompactShadowMode block_index_compact_shadow{BlockIndexCompactShadowMode::OFF};
+    BlockIndexCompactLookupMode block_index_compact_lookup{BlockIndexCompactLookupMode::OFF};
     const fs::path blocks_dir;
     Notifications& notifications;
 };
