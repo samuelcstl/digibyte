@@ -13,6 +13,8 @@
 
 namespace node {
 
+CompactBlockIndexStore::CompactBlockIndexStore() = default;
+
 CompactBlockIndexStore::~CompactBlockIndexStore()
 {
     Close();
