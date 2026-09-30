@@ -31,7 +31,7 @@ namespace node {
 class CompactBlockIndexStore
 {
 public:
-    CompactBlockIndexStore() = default;
+    CompactBlockIndexStore();
     ~CompactBlockIndexStore();
 
     CompactBlockIndexStore(const CompactBlockIndexStore&) = delete;
