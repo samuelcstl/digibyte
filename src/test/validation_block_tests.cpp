@@ -8,6 +8,7 @@
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
 #include <node/blockindex_compact.h>
+#include <node/blockindex_compact_store.h>
 #include <node/miner.h>
 #include <pow.h>
 #include <random.h>
@@ -95,6 +96,53 @@ BOOST_AUTO_TEST_CASE(compact_block_index_record_snapshot)
         // pointer; generation-2 preparation must not grow the balanced shell.
         BOOST_CHECK_EQUAL(sizeof(CBlockIndex), 152U);
     }
+}
+
+BOOST_AUTO_TEST_CASE(compact_block_index_mapped_store)
+{
+    const fs::path path{m_path_root / "compact-index-test.dat"};
+
+    node::CompactBlockIndexFileHeader header;
+    header.entry_count = 2;
+    header.genesis_hash = Params().GetConsensus().hashGenesisBlock;
+
+    node::CompactBlockIndexEntry first;
+    first.hash = uint256S("01");
+    first.record.height = 10;
+
+    node::CompactBlockIndexEntry second;
+    second.hash = uint256S("02");
+    second.record.height = 11;
+    second.record.parent = 0;
+
+    FILE* file{fsbridge::fopen(path, "wb")};
+    BOOST_REQUIRE(file != nullptr);
+    BOOST_REQUIRE_EQUAL(std::fwrite(&header, sizeof(header), 1, file), 1U);
+    BOOST_REQUIRE_EQUAL(std::fwrite(&first, sizeof(first), 1, file), 1U);
+    BOOST_REQUIRE_EQUAL(std::fwrite(&second, sizeof(second), 1, file), 1U);
+    BOOST_REQUIRE_EQUAL(std::fclose(file), 0);
+
+    node::CompactBlockIndexStore store;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(
+        store.Open(path, header.genesis_hash, error),
+        "failed to open mapped compact store: " << error);
+
+    BOOST_CHECK(store.IsOpen());
+    BOOST_CHECK_EQUAL(store.EntryCount(), 2U);
+    BOOST_CHECK_EQUAL(store.SizeBytes(),
+                      sizeof(header) + 2 * sizeof(node::CompactBlockIndexEntry));
+
+    const auto* got_first{store.Get(0)};
+    const auto* got_second{store.Get(1)};
+    BOOST_REQUIRE(got_first);
+    BOOST_REQUIRE(got_second);
+    BOOST_CHECK(got_first->hash == first.hash);
+    BOOST_CHECK_EQUAL(got_first->record.height, 10);
+    BOOST_CHECK(got_second->hash == second.hash);
+    BOOST_CHECK_EQUAL(got_second->record.parent, 0U);
+    BOOST_CHECK(store.Get(node::INVALID_BLOCK_INDEX_ID) == nullptr);
+    BOOST_CHECK(store.Get(2) == nullptr);
 }
 
 BOOST_AUTO_TEST_CASE(block_index_store_full_residency_invariants)
