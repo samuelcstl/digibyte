@@ -334,6 +334,10 @@ bool CompactBlockIndexLookup::LoadResidentProbeFront(std::string& error)
     } catch (const std::exception& e) {
         m_resident_fingerprints.clear();
         m_resident_occupancy.clear();
+        m_resident_slot_count = 0;
+        m_resident_mask = 0;
+        m_resident_k0 = 0;
+        m_resident_k1 = 0;
         error = e.what();
         return false;
     }
@@ -377,7 +381,7 @@ std::optional<BlockIndexId> CompactBlockIndexLookup::FindResident(
             }
         }
 
-        pos = (pos + 1) & mask;
+        pos = (pos + 1) & m_resident_mask;
     }
 
     return std::nullopt;
