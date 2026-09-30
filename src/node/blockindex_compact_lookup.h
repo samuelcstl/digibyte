@@ -123,7 +123,8 @@ public:
     [[nodiscard]] std::optional<BlockIndexId> FindResident(
         const uint256& hash,
         const CompactBlockIndexStore& source,
-        uint32_t* probes = nullptr) const noexcept;
+        uint32_t* probes = nullptr,
+        bool* touched_backing = nullptr) const noexcept;
 
 private:
     fs::path m_path;
@@ -137,6 +138,10 @@ private:
     // remain file-backed and are touched only after a keyed fingerprint match.
     std::vector<uint64_t> m_resident_fingerprints;
     std::vector<uint64_t> m_resident_occupancy;
+    uint64_t m_resident_slot_count{0};
+    uint64_t m_resident_mask{0};
+    uint64_t m_resident_k0{0};
+    uint64_t m_resident_k1{0};
 };
 
 } // namespace node
