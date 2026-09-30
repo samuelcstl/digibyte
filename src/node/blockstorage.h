@@ -383,6 +383,8 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool VerifyCompactBlockIndexLookup()
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    BlockIndexId AllocateCompactId()
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Return false if block file or undo file flushing fails. */
     [[nodiscard]] bool FlushBlockFile(int blockfile_num, bool fFinalize, bool finalize_undo);
@@ -498,6 +500,10 @@ public:
     BlockIndexStore m_block_index GUARDED_BY(cs_main);
     std::unique_ptr<CompactBlockIndexStore> m_compact_block_index GUARDED_BY(cs_main);
     std::unique_ptr<CompactBlockIndexLookup> m_compact_block_lookup GUARDED_BY(cs_main);
+
+    // Next process-local compact id. Startup restores/assigns the historical
+    // namespace, while clean IBD/reindex naturally starts at zero.
+    uint64_t m_next_compact_id GUARDED_BY(cs_main){0};
 
     /**
      * The height of the base block of an assumeutxo snapshot, if one is in use.
