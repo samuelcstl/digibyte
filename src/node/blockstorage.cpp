@@ -344,6 +344,34 @@ fs::path BlockManager::CompactBlockIndexShadowPath() const
     return m_opts.blocks_dir / "index.compact";
 }
 
+fs::path BlockManager::CompactBlockIndexLookupPath() const
+{
+    return m_opts.blocks_dir / "index.compact.lookup";
+}
+
+bool BlockManager::OpenCompactBlockIndexMapped()
+{
+    AssertLockHeld(cs_main);
+
+    if (m_compact_block_index && m_compact_block_index->IsOpen()) {
+        return true;
+    }
+
+    auto mapped = std::make_unique<CompactBlockIndexStore>();
+    std::string open_error;
+    const fs::path path{CompactBlockIndexShadowPath()};
+    if (!mapped->Open(path, GetConsensus().hashGenesisBlock, open_error)) {
+        LogPrintf("Compact block index: cannot map source %s: %s\n",
+                  fs::PathToString(path), open_error);
+        return false;
+    }
+
+    LogPrintf("Compact block index: opened mapped source entries=%u bytes=%u path=%s\n",
+              mapped->EntryCount(), mapped->SizeBytes(), fs::PathToString(path));
+    m_compact_block_index = std::move(mapped);
+    return true;
+}
+
 void BlockManager::AssignCompactIdsDeterministic(const std::vector<CBlockIndex*>& sorted)
 {
     AssertLockHeld(cs_main);
@@ -568,6 +596,136 @@ bool BlockManager::VerifyCompactBlockIndexShadow(const std::vector<CBlockIndex*>
               Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
 
     m_compact_block_index = std::move(mapped);
+    return true;
+}
+
+bool BlockManager::BuildCompactBlockIndexLookup()
+{
+    AssertLockHeld(cs_main);
+
+    if (!OpenCompactBlockIndexMapped()) return false;
+
+    const fs::path path{CompactBlockIndexLookupPath()};
+    const auto start{SteadyClock::now()};
+    std::string build_error;
+    if (!CompactBlockIndexLookup::Build(path, *m_compact_block_index, build_error)) {
+        LogPrintf("Compact block index: lookup build failed for %s: %s\n",
+                  fs::PathToString(path), build_error);
+        return false;
+    }
+
+    auto lookup = std::make_unique<CompactBlockIndexLookup>();
+    std::string open_error;
+    if (!lookup->Open(path, *m_compact_block_index, open_error)) {
+        LogPrintf("Compact block index: built lookup but could not reopen %s: %s\n",
+                  fs::PathToString(path), open_error);
+        return false;
+    }
+
+    LogPrintf("Compact block index: built lookup entries=%u slots=%u bytes=%u path=%s in %d ms\n",
+              lookup->EntryCount(),
+              lookup->SlotCount(),
+              lookup->SizeBytes(),
+              fs::PathToString(path),
+              Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
+
+    m_compact_block_lookup = std::move(lookup);
+    return true;
+}
+
+bool BlockManager::VerifyCompactBlockIndexLookup()
+{
+    AssertLockHeld(cs_main);
+
+    if (!OpenCompactBlockIndexMapped()) return false;
+
+    if (!m_compact_block_lookup || !m_compact_block_lookup->IsOpen()) {
+        auto lookup = std::make_unique<CompactBlockIndexLookup>();
+        std::string open_error;
+        const fs::path path{CompactBlockIndexLookupPath()};
+        if (!lookup->Open(path, *m_compact_block_index, open_error)) {
+            LogPrintf("Compact block index: cannot open lookup %s: %s\n",
+                      fs::PathToString(path), open_error);
+            return false;
+        }
+        m_compact_block_lookup = std::move(lookup);
+    }
+
+    const uint64_t count{m_compact_block_index->EntryCount()};
+    const auto verify_start{SteadyClock::now()};
+    int last_percent{-1};
+
+    for (uint64_t raw_id = 0; raw_id < count; ++raw_id) {
+        if (m_interrupt) {
+            LogPrintf("Compact block index: lookup verification interrupted\n");
+            return false;
+        }
+
+        const BlockIndexId id{static_cast<BlockIndexId>(raw_id)};
+        const CompactBlockIndexEntry* entry{m_compact_block_index->Get(id)};
+        if (!entry) {
+            LogPrintf("Compact block index: lookup verify missing source id=%u\n", id);
+            return false;
+        }
+
+        const std::optional<BlockIndexId> found{
+            m_compact_block_lookup->Find(entry->hash, *m_compact_block_index)};
+        if (!found || *found != id) {
+            LogPrintf("Compact block index: lookup mismatch id=%u hash=%s\n",
+                      id, entry->hash.ToString());
+            return false;
+        }
+
+        if (count > 0) {
+            const int percent{static_cast<int>((100 * (raw_id + 1)) / count)};
+            if (percent != last_percent && percent % 10 == 0) {
+                LogPrintf("Compact block index: lookup verify %d%%\n", percent);
+                last_percent = percent;
+            }
+        }
+    }
+
+    const auto verify_elapsed{SteadyClock::now() - verify_start};
+    LogPrintf("Compact block index: verified lookup entries=%u slots=%u bytes=%u in %d ms\n",
+              count,
+              m_compact_block_lookup->SlotCount(),
+              m_compact_block_lookup->SizeBytes(),
+              Ticks<std::chrono::milliseconds>(verify_elapsed));
+
+    // Compare lookup cost against the legacy unordered_map while both
+    // representations coexist. Sample uniformly through the persisted
+    // generation to avoid an additional allocation.
+    const uint64_t samples{std::min<uint64_t>(1'000'000, count)};
+    if (samples > 0) {
+        uint64_t legacy_hits{0};
+        uint64_t compact_hits{0};
+
+        const auto legacy_start{SteadyClock::now()};
+        for (uint64_t sample = 0; sample < samples; ++sample) {
+            const BlockIndexId id{static_cast<BlockIndexId>((sample * count) / samples)};
+            const CompactBlockIndexEntry* entry{m_compact_block_index->Get(id)};
+            legacy_hits += m_block_index.find(entry->hash) != m_block_index.end();
+        }
+        const auto legacy_elapsed{SteadyClock::now() - legacy_start};
+
+        const auto compact_start{SteadyClock::now()};
+        for (uint64_t sample = 0; sample < samples; ++sample) {
+            const BlockIndexId id{static_cast<BlockIndexId>((sample * count) / samples)};
+            const CompactBlockIndexEntry* entry{m_compact_block_index->Get(id)};
+            const auto found{m_compact_block_lookup->Find(
+                entry->hash, *m_compact_block_index)};
+            compact_hits += found && *found == id;
+        }
+        const auto compact_elapsed{SteadyClock::now() - compact_start};
+
+        LogPrintf("Compact block index: lookup benchmark positive samples=%u legacy_hits=%u legacy=%d ms compact_hits=%u compact=%d ms\n",
+                  samples,
+                  legacy_hits,
+                  Ticks<std::chrono::milliseconds>(legacy_elapsed),
+                  compact_hits,
+                  Ticks<std::chrono::milliseconds>(compact_elapsed));
+    }
+
     return true;
 }
 
@@ -969,6 +1127,24 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
             LogPrintf("Compact block index: shadow unavailable or incompatible; continuing with legacy block index\n");
             AssignCompactIdsDeterministic(vSortedByHeight);
             m_compact_block_index.reset();
+        }
+        break;
+    }
+
+    switch (m_opts.block_index_compact_lookup) {
+    case kernel::BlockIndexCompactLookupMode::OFF:
+        break;
+    case kernel::BlockIndexCompactLookupMode::BUILD:
+        if (!BuildCompactBlockIndexLookup() ||
+            !VerifyCompactBlockIndexLookup()) {
+            LogPrintf("Compact block index: lookup build/verify failed; continuing without compact lookup\n");
+            m_compact_block_lookup.reset();
+        }
+        break;
+    case kernel::BlockIndexCompactLookupMode::VERIFY:
+        if (!VerifyCompactBlockIndexLookup()) {
+            LogPrintf("Compact block index: lookup unavailable or incompatible; continuing without compact lookup\n");
+            m_compact_block_lookup.reset();
         }
         break;
     }
