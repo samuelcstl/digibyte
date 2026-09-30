@@ -89,6 +89,12 @@ BOOST_AUTO_TEST_CASE(compact_block_index_record_snapshot)
 
     BOOST_CHECK_EQUAL(sizeof(CompactBlockIndexRecord), 120U);
     BOOST_CHECK_EQUAL(sizeof(CompactBlockIndexEntry), 160U);
+    BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexFileHeader), 128U);
+    if constexpr (sizeof(void*) == 8) {
+        // m_compact_id consumes the former alignment padding before the payload
+        // pointer; generation-2 preparation must not grow the balanced shell.
+        BOOST_CHECK_EQUAL(sizeof(CBlockIndex), 152U);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(block_index_store_full_residency_invariants)
