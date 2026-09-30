@@ -763,6 +763,16 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
               CBlockIndexHeightOnlyComparator());
     LogPrintf("Startup timing: first block-index height sort: %d entries in %d ms\n",
               vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - sort_start));
+
+    if (vSortedByHeight.size() >= static_cast<size_t>(INVALID_BLOCK_INDEX_ID)) {
+        return error("%s: compact block-index id space exhausted", __func__);
+    }
+    for (size_t id = 0; id < vSortedByHeight.size(); ++id) {
+        vSortedByHeight[id]->m_compact_id = static_cast<BlockIndexId>(id);
+    }
+
+    LogPrintf("LoadBlockIndex: assigned compact ids to %u block indices\n",
+              vSortedByHeight.size());
     LogPrintf("LoadBlockIndex: Sort complete, processing blocks...");
     const auto process_start{SteadyClock::now()};
 
@@ -878,6 +888,18 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
               Ticks<std::chrono::milliseconds>(reconstruction_linkage_time));
     LogPrintf("Startup timing: block-index reconstruction pass: %d entries in %d ms\n",
               nProcessed, Ticks<std::chrono::milliseconds>(SteadyClock::now() - process_start));
+
+    switch (m_opts.block_index_compact_shadow) {
+    case kernel::BlockIndexCompactShadowMode::OFF:
+        break;
+    case kernel::BlockIndexCompactShadowMode::BUILD:
+        if (!BuildCompactBlockIndexShadow(vSortedByHeight)) return false;
+        break;
+    case kernel::BlockIndexCompactShadowMode::VERIFY:
+        if (!VerifyCompactBlockIndexShadow(vSortedByHeight)) return false;
+        break;
+    }
+
     return true;
 }
 
