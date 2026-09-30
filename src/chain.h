@@ -17,6 +17,7 @@
 #include <uint256.h>
 #include <util/time.h>
 
+#include <algorithm>
 #include <array>
 #include <limits>
 #include <vector>
