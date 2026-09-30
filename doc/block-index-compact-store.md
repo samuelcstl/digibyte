@@ -243,8 +243,25 @@ remains mandatory before returning a positive result. If the threat model
 requires still more margin, two independent keyed fingerprints can be
 evaluated against the extra resident-memory cost.
 
-Cold/page-cache-eviction behavior still needs measurement before selecting the
-final split/residency policy.
+A first resident-front prototype copies only keyed fingerprints plus an
+occupancy bitmap into anonymous memory. At the current 2^25-slot table this is
+272,629,760 bytes (about 260 MiB). The front loaded in about 260 ms.
+
+Measured immediately after lookup verification:
+
+- one million resident-front positive lookups took 294 ms, averaging 2.315
+  probes with a maximum of 168;
+- one million resident-front negative lookups took 189 ms, averaging 7.069
+  probes with a maximum of 247.
+
+This keeps the miss-side probe work on a compact anonymous surface while exact
+ids and full hashes remain file-backed. A follow-up tightens the implementation
+so even the lookup header/key/slot-count state is copied into the resident
+front; instrumentation reports whether any negative lookup reaches mapped
+backing state.
+
+Cold/page-cache-eviction behavior and memory-pressure behavior still need
+measurement before selecting the final split/residency policy.
 
 ## Compatibility, clean IBD, migration and recovery
 
