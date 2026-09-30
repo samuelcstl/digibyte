@@ -13,6 +13,7 @@
 #include <kernel/chainparams.h>
 #include <kernel/messagestartchars.h>
 #include <logging.h>
+#include <node/blockindex_compact.h>
 #include <node/interface_ui.h>
 #include <pow.h>
 #include <primitives/block.h>
@@ -23,12 +24,14 @@
 #include <undo.h>
 #include <util/batchpriority.h>
 #include <util/fs.h>
+#include <util/fs_helpers.h>
 #include <util/signalinterrupt.h>
 #include <util/strencodings.h>
 #include <util/time.h>
 #include <util/translation.h>
 #include <validation.h>
 
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <unordered_map>
@@ -315,6 +318,192 @@ std::vector<CBlockIndex*> BlockManager::GetAllBlockIndices()
         rv.push_back(&block_index);
     }
     return rv;
+}
+
+fs::path BlockManager::CompactBlockIndexShadowPath() const
+{
+    return m_opts.blocks_dir / "index.compact";
+}
+
+bool BlockManager::BuildCompactBlockIndexShadow(const std::vector<CBlockIndex*>& sorted)
+{
+    AssertLockHeld(cs_main);
+
+    const fs::path final_path{CompactBlockIndexShadowPath()};
+    fs::path tmp_path{final_path};
+    tmp_path += ".tmp";
+
+    FILE* file{fsbridge::fopen(tmp_path, "wb")};
+    if (!file) {
+        return error("%s: cannot open compact shadow temp file %s",
+                     __func__, fs::PathToString(tmp_path));
+    }
+
+    auto fail = [&](const char* reason) {
+        std::fclose(file);
+        file = nullptr;
+        fs::remove(tmp_path);
+        return error("%s: %s", __func__, reason);
+    };
+
+    CompactBlockIndexFileHeader header;
+    header.entry_count = sorted.size();
+    header.genesis_hash = GetConsensus().hashGenesisBlock;
+    header.generation = 1;
+
+    if (std::fwrite(&header, sizeof(header), 1, file) != 1) {
+        return fail("failed to write compact shadow header");
+    }
+
+    const auto start{SteadyClock::now()};
+    size_t written{0};
+    int last_percent{-1};
+
+    for (const CBlockIndex* index : sorted) {
+        if (m_interrupt) {
+            return fail("interrupted while writing compact shadow");
+        }
+
+        const BlockIndexId parent_id{
+            index->pprev ? index->pprev->m_compact_id : INVALID_BLOCK_INDEX_ID};
+        const BlockIndexId skip_id{
+            index->pskip ? index->pskip->m_compact_id : INVALID_BLOCK_INDEX_ID};
+
+        if ((index->pprev && parent_id == INVALID_BLOCK_INDEX_ID) ||
+            (index->pskip && skip_id == INVALID_BLOCK_INDEX_ID)) {
+            return fail("encountered unresolved parent/skip compact id");
+        }
+
+        CompactBlockIndexEntry entry;
+        entry.hash = index->GetBlockHash();
+        entry.record = CompactBlockIndexRecord::FromBlockIndex(*index, parent_id, skip_id);
+
+        if (std::fwrite(&entry, sizeof(entry), 1, file) != 1) {
+            return fail("failed to write compact shadow entry");
+        }
+
+        ++written;
+        if (!sorted.empty()) {
+            const int percent{static_cast<int>((100 * written) / sorted.size())};
+            if (percent != last_percent && percent % 10 == 0) {
+                LogPrintf("Compact block index: shadow build %d%%\n", percent);
+                last_percent = percent;
+            }
+        }
+    }
+
+    if (!FileCommit(file)) {
+        return fail("failed to fsync compact shadow");
+    }
+    if (std::fclose(file) != 0) {
+        file = nullptr;
+        fs::remove(tmp_path);
+        return error("%s: failed to close compact shadow temp file", __func__);
+    }
+    file = nullptr;
+
+    if (!RenameOver(tmp_path, final_path)) {
+        fs::remove(tmp_path);
+        return error("%s: failed to publish compact shadow %s",
+                     __func__, fs::PathToString(final_path));
+    }
+    DirectoryCommit(final_path.parent_path());
+
+    const uint64_t bytes{
+        sizeof(CompactBlockIndexFileHeader) +
+        static_cast<uint64_t>(written) * sizeof(CompactBlockIndexEntry)};
+    LogPrintf("Compact block index: built shadow entries=%u bytes=%u path=%s in %d ms\n",
+              written,
+              bytes,
+              fs::PathToString(final_path),
+              Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
+    return true;
+}
+
+bool BlockManager::VerifyCompactBlockIndexShadow(const std::vector<CBlockIndex*>& sorted) const
+{
+    AssertLockHeld(cs_main);
+
+    const fs::path path{CompactBlockIndexShadowPath()};
+    FILE* file{fsbridge::fopen(path, "rb")};
+    if (!file) {
+        return error("%s: cannot open compact shadow %s",
+                     __func__, fs::PathToString(path));
+    }
+
+    auto fail = [&](const char* reason) {
+        std::fclose(file);
+        file = nullptr;
+        return error("%s: %s", __func__, reason);
+    };
+
+    CompactBlockIndexFileHeader header;
+    if (std::fread(&header, sizeof(header), 1, file) != 1) {
+        return fail("failed to read compact shadow header");
+    }
+
+    if (header.magic != COMPACT_BLOCK_INDEX_MAGIC ||
+        header.version != COMPACT_BLOCK_INDEX_FORMAT_VERSION ||
+        header.entry_size != sizeof(CompactBlockIndexEntry) ||
+        header.entry_count != sorted.size() ||
+        header.genesis_hash != GetConsensus().hashGenesisBlock) {
+        return fail("compact shadow header mismatch");
+    }
+
+    const auto start{SteadyClock::now()};
+    size_t verified{0};
+    int last_percent{-1};
+
+    for (const CBlockIndex* index : sorted) {
+        if (m_interrupt) {
+            return fail("interrupted while verifying compact shadow");
+        }
+
+        CompactBlockIndexEntry entry;
+        if (std::fread(&entry, sizeof(entry), 1, file) != 1) {
+            return fail("short read in compact shadow");
+        }
+
+        const BlockIndexId parent_id{
+            index->pprev ? index->pprev->m_compact_id : INVALID_BLOCK_INDEX_ID};
+        const BlockIndexId skip_id{
+            index->pskip ? index->pskip->m_compact_id : INVALID_BLOCK_INDEX_ID};
+
+        if (entry.hash != index->GetBlockHash() ||
+            !entry.record.MatchesBlockIndex(*index, parent_id, skip_id)) {
+            LogPrintf("Compact block index: mismatch at id=%u height=%d hash=%s\n",
+                      index->m_compact_id,
+                      index->nHeight,
+                      index->GetBlockHash().ToString());
+            return fail("compact shadow record mismatch");
+        }
+
+        ++verified;
+        if (!sorted.empty()) {
+            const int percent{static_cast<int>((100 * verified) / sorted.size())};
+            if (percent != last_percent && percent % 10 == 0) {
+                LogPrintf("Compact block index: shadow verify %d%%\n", percent);
+                last_percent = percent;
+            }
+        }
+    }
+
+    const int trailing{std::fgetc(file)};
+    if (trailing != EOF) {
+        return fail("compact shadow contains trailing data");
+    }
+
+    if (std::fclose(file) != 0) {
+        file = nullptr;
+        return error("%s: failed to close compact shadow", __func__);
+    }
+    file = nullptr;
+
+    LogPrintf("Compact block index: verified shadow entries=%u path=%s in %d ms\n",
+              verified,
+              fs::PathToString(path),
+              Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
+    return true;
 }
 
 CBlockIndex* BlockManager::LookupBlockIndex(const uint256& hash)
