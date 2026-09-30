@@ -314,10 +314,15 @@ bool CompactBlockIndexLookup::LoadResidentProbeFront(std::string& error)
     }
 
     try {
-        m_resident_fingerprints.assign(m_header->slot_count, 0);
-        m_resident_occupancy.assign((m_header->slot_count + 63) / 64, 0);
+        m_resident_slot_count = m_header->slot_count;
+        m_resident_mask = m_resident_slot_count - 1;
+        m_resident_k0 = m_header->k0;
+        m_resident_k1 = m_header->k1;
 
-        for (uint64_t pos = 0; pos < m_header->slot_count; ++pos) {
+        m_resident_fingerprints.assign(m_resident_slot_count, 0);
+        m_resident_occupancy.assign((m_resident_slot_count + 63) / 64, 0);
+
+        for (uint64_t pos = 0; pos < m_resident_slot_count; ++pos) {
             const CompactBlockIndexLookupSlot& slot{m_slots[pos]};
             if (slot.id == INVALID_BLOCK_INDEX_ID) continue;
 
@@ -337,19 +342,21 @@ bool CompactBlockIndexLookup::LoadResidentProbeFront(std::string& error)
 std::optional<BlockIndexId> CompactBlockIndexLookup::FindResident(
     const uint256& hash,
     const CompactBlockIndexStore& source,
-    uint32_t* probes) const noexcept
+    uint32_t* probes,
+    bool* touched_backing) const noexcept
 {
     if (probes) *probes = 0;
-    if (!m_header || !m_slots || !source.IsOpen() ||
-        m_resident_fingerprints.size() != m_header->slot_count) {
+    if (touched_backing) *touched_backing = false;
+    if (!m_slots || m_resident_slot_count == 0 ||
+        m_resident_fingerprints.size() != m_resident_slot_count) {
         return std::nullopt;
     }
 
-    const uint64_t fp{Fingerprint(m_header->k0, m_header->k1, hash)};
-    const uint64_t mask{m_header->slot_count - 1};
-    uint64_t pos{fp & mask};
+    const uint64_t fp{
+        Fingerprint(m_resident_k0, m_resident_k1, hash)};
+    uint64_t pos{fp & m_resident_mask};
 
-    for (uint64_t probe = 0; probe < m_header->slot_count; ++probe) {
+    for (uint64_t probe = 0; probe < m_resident_slot_count; ++probe) {
         if (probes) *probes = static_cast<uint32_t>(probe + 1);
 
         const bool occupied{
@@ -362,6 +369,7 @@ std::optional<BlockIndexId> CompactBlockIndexLookup::FindResident(
             // The id/full-hash backing is intentionally touched only after a
             // keyed fingerprint match. For arbitrary remote misses this keeps
             // the entire probe walk on the resident front.
+            if (touched_backing) *touched_backing = true;
             const CompactBlockIndexLookupSlot& slot{m_slots[pos]};
             const CompactBlockIndexEntry* entry{source.Get(slot.id)};
             if (entry && entry->hash == hash) {
@@ -379,6 +387,10 @@ void CompactBlockIndexLookup::Close()
 {
     m_resident_fingerprints.clear();
     m_resident_occupancy.clear();
+    m_resident_slot_count = 0;
+    m_resident_mask = 0;
+    m_resident_k0 = 0;
+    m_resident_k1 = 0;
     m_slots = nullptr;
     m_header = nullptr;
     m_size_bytes = 0;
