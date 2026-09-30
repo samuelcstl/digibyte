@@ -98,7 +98,8 @@ public:
 
     [[nodiscard]] std::optional<BlockIndexId> Find(
         const uint256& hash,
-        const CompactBlockIndexStore& source) const noexcept;
+        const CompactBlockIndexStore& source,
+        uint32_t* probes = nullptr) const noexcept;
 
 private:
     fs::path m_path;
