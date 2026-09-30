@@ -18,6 +18,7 @@
 #include <util/time.h>
 
 #include <array>
+#include <limits>
 #include <vector>
 
 /**
@@ -215,6 +216,16 @@ public:
 
     //! (memory only) Maximum nTime in the chain up to and including this block.
     unsigned int nTimeMax{0};
+
+    /**
+     * Generation-2 compact-store id.
+     *
+     * On 64-bit builds this occupies the four bytes that were previously
+     * alignment padding before m_resident_payload, so the balanced CBlockIndex
+     * shell remains 152 bytes. It is assigned after the startup height sort and
+     * is not consensus state.
+     */
+    uint32_t m_compact_id{std::numeric_limits<uint32_t>::max()};
 
     /**
      * Optional residency-managed payload. BlockIndexStore owns this object.
