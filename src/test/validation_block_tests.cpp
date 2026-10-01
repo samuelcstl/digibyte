@@ -206,6 +206,9 @@ BOOST_AUTO_TEST_CASE(compact_block_index_metadata_delta_log)
     records[3].entry.record.height = 103;
 
     BOOST_REQUIRE_MESSAGE(log.Append(records, error), "append failed: " << error);
+    BOOST_CHECK_EQUAL(log.BaseGeneration(), 7U);
+    BOOST_CHECK_EQUAL(log.BaseEntryCount(), 10U);
+    BOOST_CHECK_EQUAL(log.SnapshotTailEntryCount(), 3U);
     BOOST_CHECK_EQUAL(log.RecordCount(), records.size());
     BOOST_CHECK_EQUAL(
         log.SizeBytes(),
@@ -236,6 +239,66 @@ BOOST_AUTO_TEST_CASE(compact_block_index_metadata_delta_log)
         reopened.Open(log_path, 7, 10, 3, genesis, error),
         "reopen failed: " << error);
     BOOST_CHECK_EQUAL(reopened.RecordCount(), records.size());
+}
+
+BOOST_AUTO_TEST_CASE(compact_block_index_metadata_pending_batch)
+{
+    const fs::path log_path{m_path_root / "compact-index-delta-main.log"};
+    const fs::path pending_path{m_path_root / "compact-index-delta.pending"};
+    const uint256 genesis{Params().GetConsensus().hashGenesisBlock};
+    std::string error;
+
+    BOOST_REQUIRE(node::CompactBlockIndexDeltaLog::Create(
+        log_path, 7, 10, 3, genesis, error));
+    BOOST_REQUIRE(node::CompactBlockIndexDeltaLog::Create(
+        pending_path, 7, 10, 3, genesis, error));
+
+    node::CompactBlockIndexDeltaLog log;
+    node::CompactBlockIndexDeltaLog pending;
+    BOOST_REQUIRE(log.Open(log_path, 7, 10, 3, genesis, error));
+    BOOST_REQUIRE(pending.Open(pending_path, 7, 10, 3, genesis, error));
+
+    std::vector<node::CompactBlockIndexDeltaLogRecord> staged(2);
+    staged[0].id = 2;
+    staged[0].entry.hash = uint256S("aaaa");
+    staged[0].entry.record.height = 2;
+    staged[0].entry.record.status = BLOCK_VALID_TREE;
+    staged[1].id = 13;
+    staged[1].entry.hash = uint256S("bbbb");
+    staged[1].entry.record.height = 103;
+
+    BOOST_REQUIRE_MESSAGE(pending.Append(staged, error), error);
+    BOOST_CHECK_EQUAL(pending.RecordCount(), staged.size());
+
+    std::vector<node::CompactBlockIndexDeltaLogRecord> recovered;
+    BOOST_REQUIRE_MESSAGE(
+        pending.ForEach(
+            [&](const node::CompactBlockIndexDeltaLogRecord& record) {
+                recovered.push_back(record);
+                return true;
+            },
+            error),
+        error);
+
+    BOOST_REQUIRE_EQUAL(recovered.size(), staged.size());
+    BOOST_REQUIRE_MESSAGE(log.Append(recovered, error), error);
+    BOOST_CHECK_EQUAL(log.RecordCount(), staged.size());
+
+    std::vector<node::CompactBlockIndexDeltaLogRecord> published;
+    BOOST_REQUIRE_MESSAGE(
+        log.ForEach(
+            [&](const node::CompactBlockIndexDeltaLogRecord& record) {
+                published.push_back(record);
+                return true;
+            },
+            error),
+        error);
+
+    BOOST_REQUIRE_EQUAL(published.size(), staged.size());
+    BOOST_CHECK_EQUAL(published[0].id, 2U);
+    BOOST_CHECK(published[0].entry.hash == uint256S("aaaa"));
+    BOOST_CHECK_EQUAL(published[1].id, 13U);
+    BOOST_CHECK(published[1].entry.hash == uint256S("bbbb"));
 }
 
 BOOST_AUTO_TEST_CASE(compact_block_index_metadata_delta_snapshot)

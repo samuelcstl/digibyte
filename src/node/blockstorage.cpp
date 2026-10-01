@@ -365,6 +365,11 @@ fs::path BlockManager::CompactBlockIndexDeltaLogPath() const
     return m_opts.blocks_dir / "index.compact.delta.log";
 }
 
+fs::path BlockManager::CompactBlockIndexDeltaPendingPath() const
+{
+    return m_opts.blocks_dir / "index.compact.delta.pending";
+}
+
 bool BlockManager::OpenCompactBlockIndexMapped()
 {
     AssertLockHeld(cs_main);
@@ -952,14 +957,13 @@ bool BlockManager::OpenCompactBlockIndexDeltaLog(bool create)
     return true;
 }
 
-bool BlockManager::PersistCompactBlockIndexDeltaLog(
-    const std::vector<const CBlockIndex*>& blockinfo)
+bool BlockManager::BuildCompactBlockIndexDeltaLogRecords(
+    const std::vector<const CBlockIndex*>& blockinfo,
+    std::vector<CompactBlockIndexDeltaLogRecord>& updates)
 {
     AssertLockHeld(cs_main);
 
-    if (!m_compact_block_delta_log || !m_compact_block_delta_log->IsOpen()) {
-        return true;
-    }
+    updates.clear();
 
     std::vector<const CBlockIndex*> ordered;
     ordered.reserve(blockinfo.size());
@@ -977,7 +981,6 @@ bool BlockManager::PersistCompactBlockIndexDeltaLog(
             return a->m_compact_id < b->m_compact_id;
         });
 
-    std::vector<CompactBlockIndexDeltaLogRecord> updates;
     updates.reserve(ordered.size());
 
     for (const CBlockIndex* index : ordered) {
@@ -1001,18 +1004,231 @@ bool BlockManager::PersistCompactBlockIndexDeltaLog(
         updates.push_back(update);
     }
 
+    return true;
+}
+
+bool BlockManager::ClearCompactBlockIndexDeltaPending()
+{
+    AssertLockHeld(cs_main);
+
+    const fs::path path{CompactBlockIndexDeltaPendingPath()};
+    try {
+        if (!fs::exists(path)) return true;
+        fs::remove(path);
+        DirectoryCommit(path.parent_path());
+        return true;
+    } catch (const std::exception& e) {
+        LogPrintf("Compact block index: failed clearing metadata pending batch %s: %s\n",
+                  fs::PathToString(path), e.what());
+        return false;
+    }
+}
+
+void BlockManager::InvalidateCompactBlockIndexDeltaOverlay()
+{
+    AssertLockHeld(cs_main);
+
+    m_compact_block_delta_log.reset();
+    m_compact_block_delta.reset();
+
+    const fs::path path{CompactBlockIndexDeltaLogPath()};
+    try {
+        if (fs::exists(path)) {
+            fs::remove(path);
+            DirectoryCommit(path.parent_path());
+        }
+    } catch (const std::exception& e) {
+        LogPrintf("Compact block index: failed removing invalid metadata delta log %s: %s\n",
+                  fs::PathToString(path), e.what());
+    }
+}
+
+bool BlockManager::StageCompactBlockIndexDeltaPending(
+    const std::vector<const CBlockIndex*>& blockinfo)
+{
+    AssertLockHeld(cs_main);
+
+    if (!m_compact_block_delta_log || !m_compact_block_delta_log->IsOpen()) {
+        return true;
+    }
+
+    std::vector<CompactBlockIndexDeltaLogRecord> updates;
+    if (!BuildCompactBlockIndexDeltaLogRecords(blockinfo, updates)) {
+        return false;
+    }
+
+    if (updates.empty()) {
+        return ClearCompactBlockIndexDeltaPending();
+    }
+
+    const fs::path path{CompactBlockIndexDeltaPendingPath()};
     std::string error;
-    if (!m_compact_block_delta_log->Append(updates, error)) {
-        LogPrintf("Compact block index: failed persisting metadata updates: %s\n",
+
+    if (!CompactBlockIndexDeltaLog::Create(
+            path,
+            m_compact_block_delta_log->BaseGeneration(),
+            m_compact_block_delta_log->BaseEntryCount(),
+            m_compact_block_delta_log->SnapshotTailEntryCount(),
+            GetConsensus().hashGenesisBlock,
+            error)) {
+        LogPrintf("Compact block index: failed creating metadata pending batch %s: %s\n",
+                  fs::PathToString(path), error);
+        return false;
+    }
+
+    CompactBlockIndexDeltaLog pending;
+    if (!pending.Open(
+            path,
+            m_compact_block_delta_log->BaseGeneration(),
+            m_compact_block_delta_log->BaseEntryCount(),
+            m_compact_block_delta_log->SnapshotTailEntryCount(),
+            GetConsensus().hashGenesisBlock,
+            error) ||
+        !pending.Append(updates, error)) {
+        LogPrintf("Compact block index: failed staging metadata pending batch %s: %s\n",
+                  fs::PathToString(path), error);
+        return false;
+    }
+
+    LogPrintf("Compact block index: staged metadata pending batch count=%u bytes=%u\n",
+              pending.RecordCount(), pending.SizeBytes());
+    return true;
+}
+
+bool BlockManager::PublishCompactBlockIndexDeltaPending()
+{
+    AssertLockHeld(cs_main);
+
+    if (!m_compact_block_delta_log || !m_compact_block_delta_log->IsOpen()) {
+        return true;
+    }
+
+    const fs::path path{CompactBlockIndexDeltaPendingPath()};
+    if (!fs::exists(path)) return true;
+
+    CompactBlockIndexDeltaLog pending;
+    std::string error;
+    if (!pending.Open(
+            path,
+            m_compact_block_delta_log->BaseGeneration(),
+            m_compact_block_delta_log->BaseEntryCount(),
+            m_compact_block_delta_log->SnapshotTailEntryCount(),
+            GetConsensus().hashGenesisBlock,
+            error)) {
+        LogPrintf("Compact block index: failed opening metadata pending batch %s: %s\n",
+                  fs::PathToString(path), error);
+        return false;
+    }
+
+    std::vector<CompactBlockIndexDeltaLogRecord> updates;
+    updates.reserve(static_cast<size_t>(pending.RecordCount()));
+    if (!pending.ForEach(
+            [&](const CompactBlockIndexDeltaLogRecord& update) {
+                updates.push_back(update);
+                return true;
+            },
+            error)) {
+        LogPrintf("Compact block index: failed reading metadata pending batch: %s\n",
                   error);
         return false;
     }
 
-    LogPrintf("Compact block index: persisted metadata updates count=%u records=%u bytes=%u\n",
+    if (!updates.empty() && !m_compact_block_delta_log->Append(updates, error)) {
+        LogPrintf("Compact block index: failed publishing metadata pending batch: %s\n",
+                  error);
+        return false;
+    }
+
+    if (!ClearCompactBlockIndexDeltaPending()) {
+        return false;
+    }
+
+    LogPrintf("Compact block index: published metadata pending batch count=%u records=%u bytes=%u\n",
               updates.size(),
               m_compact_block_delta_log->RecordCount(),
               m_compact_block_delta_log->SizeBytes());
     return true;
+}
+
+bool BlockManager::ReconcileCompactBlockIndexDeltaPending()
+{
+    AssertLockHeld(cs_main);
+
+    const fs::path path{CompactBlockIndexDeltaPendingPath()};
+    if (!fs::exists(path)) return true;
+
+    if (!m_compact_block_delta_log || !m_compact_block_delta_log->IsOpen()) {
+        LogPrintf("Compact block index: cannot reconcile metadata pending batch without delta log\n");
+        return false;
+    }
+
+    CompactBlockIndexDeltaLog pending;
+    std::string error;
+    if (!pending.Open(
+            path,
+            m_compact_block_delta_log->BaseGeneration(),
+            m_compact_block_delta_log->BaseEntryCount(),
+            m_compact_block_delta_log->SnapshotTailEntryCount(),
+            GetConsensus().hashGenesisBlock,
+            error)) {
+        LogPrintf("Compact block index: cannot open metadata pending batch %s: %s\n",
+                  fs::PathToString(path), error);
+        return false;
+    }
+
+    std::vector<CompactBlockIndexDeltaLogRecord> updates;
+    updates.reserve(static_cast<size_t>(pending.RecordCount()));
+    if (!pending.ForEach(
+            [&](const CompactBlockIndexDeltaLogRecord& update) {
+                updates.push_back(update);
+                return true;
+            },
+            error)) {
+        LogPrintf("Compact block index: failed reading metadata pending batch: %s\n",
+                  error);
+        return false;
+    }
+
+    bool canonical_match{true};
+    for (const CompactBlockIndexDeltaLogRecord& update : updates) {
+        if (static_cast<uint64_t>(update.id) >= m_next_compact_id) {
+            canonical_match = false;
+            break;
+        }
+
+        CBlockIndex* index{LookupBlockIndex(update.entry.hash)};
+        if (!index || index->m_compact_id != update.id) {
+            canonical_match = false;
+            break;
+        }
+
+        const BlockIndexId parent_id{
+            index->pprev ? index->pprev->m_compact_id : INVALID_BLOCK_INDEX_ID};
+        const BlockIndexId skip_id{
+            index->pskip ? index->pskip->m_compact_id : INVALID_BLOCK_INDEX_ID};
+
+        if (!update.entry.record.MatchesBlockIndex(*index, parent_id, skip_id)) {
+            canonical_match = false;
+            break;
+        }
+    }
+
+    if (canonical_match && !updates.empty()) {
+        if (!m_compact_block_delta_log->Append(updates, error)) {
+            LogPrintf("Compact block index: failed recovering committed metadata pending batch: %s\n",
+                      error);
+            return false;
+        }
+        LogPrintf("Compact block index: recovered committed metadata pending batch count=%u records=%u bytes=%u\n",
+                  updates.size(),
+                  m_compact_block_delta_log->RecordCount(),
+                  m_compact_block_delta_log->SizeBytes());
+    } else if (!updates.empty()) {
+        LogPrintf("Compact block index: discarded uncommitted metadata pending batch count=%u\n",
+                  updates.size());
+    }
+
+    return ClearCompactBlockIndexDeltaPending();
 }
 
 bool BlockManager::BuildCompactBlockIndexDelta(
@@ -1143,6 +1359,11 @@ bool BlockManager::BuildCompactBlockIndexDelta(
         m_compact_block_delta.reset();
         return false;
     }
+    if (!ClearCompactBlockIndexDeltaPending()) {
+        m_compact_block_delta_log.reset();
+        m_compact_block_delta.reset();
+        return false;
+    }
     return true;
 }
 
@@ -1196,6 +1417,10 @@ bool BlockManager::VerifyCompactBlockIndexDelta()
         if (!OpenCompactBlockIndexDeltaLog(/*create=*/false)) {
             return false;
         }
+    }
+
+    if (!ReconcileCompactBlockIndexDeltaPending()) {
+        return false;
     }
 
     const auto start{SteadyClock::now()};
@@ -2099,16 +2324,34 @@ bool BlockManager::WriteBlockIndexDB()
     if (!PersistCompactIds(vBlocks)) {
         return false;
     }
+
+    // Stage the exact compact metadata batch before committing LevelDB. The
+    // pending file is a recovery journal, not authoritative state: after a
+    // crash startup compares it against the canonical LevelDB graph and either
+    // publishes or discards the complete batch.
+    bool metadata_staged{false};
+    if (m_compact_block_delta_log && m_compact_block_delta_log->IsOpen()) {
+        if (!StageCompactBlockIndexDeltaPending(vBlocks)) {
+            LogPrintf("Compact block index: disabling metadata delta after pending-batch failure; legacy block index remains authoritative\n");
+            ClearCompactBlockIndexDeltaPending();
+            InvalidateCompactBlockIndexDeltaOverlay();
+        } else {
+            metadata_staged = true;
+        }
+    }
+
     if (!m_block_tree_db->WriteBatchSync(vFiles, max_blockfile, vBlocks)) {
+        if (metadata_staged && !ClearCompactBlockIndexDeltaPending()) {
+            LogPrintf("Compact block index: metadata pending batch remains after failed legacy commit; startup will reconcile it\n");
+        }
         return false;
     }
 
-    // The ordinary upstream block index remains canonical. Publish the compact
-    // metadata overlay only after its corresponding LevelDB batch succeeds.
-    // Failure disables the derived live overlay but must not invalidate the
-    // successfully committed compatibility database.
-    if (!PersistCompactBlockIndexDeltaLog(vBlocks)) {
-        LogPrintf("Compact block index: disabling metadata delta log after persistence failure; legacy block index remains authoritative\n");
+    // The ordinary upstream block index is canonical. Only after its atomic
+    // batch succeeds do we publish the staged compact records. If publication
+    // fails, leave the pending batch intact so startup can finish the commit.
+    if (metadata_staged && !PublishCompactBlockIndexDeltaPending()) {
+        LogPrintf("Compact block index: disabling metadata delta after publish failure; pending batch retained for restart recovery\n");
         m_compact_block_delta_log.reset();
         m_compact_block_delta.reset();
     }

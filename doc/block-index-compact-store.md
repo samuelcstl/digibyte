@@ -174,11 +174,17 @@ metadata-log persistence fails after LevelDB succeeds, the derived overlay is
 disabled and the successful upstream commit remains authoritative.
 
 The delta snapshot/log format, replay, identity checks and runtime write wiring
-are covered by targeted unit tests. Real-node validation of normal network
-growth, graceful restart and replay is the next gate. Crash reconciliation,
-periodic checkpoint/log compaction, lookup-tail maintenance, generation
-rollover and compact-native startup remain pending before the compact
-representation can become authoritative.
+are covered by targeted unit tests and have now passed the first real-node
+maintenance cycle. Starting from a 5,773-record checkpoint, normal network
+growth allocated 41 new ids, appended 41 full metadata records to a 7,016-byte
+log, and a verify-mode restart replayed all 41 as post-checkpoint extensions in
+4 ms with full equivalence against the canonical legacy graph.
+
+The next crash-consistency slice adds a pre-commit pending metadata batch so a
+process death after the LevelDB commit but before delta-log publication can be
+reconciled without scanning whole history. Periodic checkpoint/log compaction,
+lookup-tail maintenance, generation rollover and compact-native startup remain
+pending before the compact representation can become authoritative.
 
 Normal `LookupBlockIndex()` is still backed by the legacy map. Normal startup
 still performs the LevelDB count pass, deserializes roughly 24.3 million
@@ -388,19 +394,36 @@ the compact delta/log is disabled rather than turning an already-successful
 legacy commit into a node failure.
 
 Targeted tests cover the delta checkpoint, append/replay semantics, persistent
-ids and runtime write integration. The next real-node gate is to create a fresh
-checkpoint/log, allow ordinary network growth to append updates/new ids, stop
-cleanly, restart in verify mode and prove that base + checkpoint + last-write-
-wins log reproduces the canonical legacy graph.
+ids and runtime write integration. The real-node live-maintenance gate also
+passed: a fresh checkpoint/log followed by normal chain growth produced 41
+post-checkpoint records, and verify-mode restart replayed all 41 with exact
+legacy-graph equivalence.
+
+### Pending-batch crash reconciliation
+
+To close the remaining LevelDB-to-delta-log crash window, each dirty metadata
+batch is now staged in `blocks/index.compact.delta.pending` before the
+canonical LevelDB batch is committed. The pending file uses the same
+full-record, data-first/fsynced format as the main sparse log.
+
+After a successful LevelDB commit, the exact staged records are appended to the
+main log and the pending file is removed. If the process dies first, startup
+loads the canonical legacy graph, compares every pending record against that
+graph, and either publishes the complete matching batch or discards it as
+uncommitted. Because LevelDB batch publication is atomic, this bounds recovery
+to the interrupted dirty batch and also covers mutable updates to old/base ids
+without a whole-history scan.
+
+A fresh checkpoint makes any older pending batch obsolete and clears it. If
+pre-commit staging itself fails, the derived log is invalidated rather than
+allowing later verify mode to trust an overlay that missed a canonical update.
 
 ### Remaining crash-consistency and lifecycle work
 
-The current post-LevelDB metadata-log ordering intentionally prefers canonical
-upstream correctness, but it leaves one recovery case to solve: a process crash
-after LevelDB commits and before the matching metadata records are appended can
-leave the derived overlay behind canonical state. Verify mode detects a missing
-extension or mismatch, but production recovery must reconcile this condition
-without requiring a whole-history rewrite.
+The next gate is deliberate fault injection around the staged batch, canonical
+LevelDB commit and delta-log publish boundaries. It must prove both outcomes:
+an uncommitted staged batch is discarded, while a committed-but-unpublished
+batch is recovered exactly once modulo harmless last-write-wins duplicates.
 
 Still required:
 

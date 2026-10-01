@@ -377,6 +377,7 @@ private:
     fs::path CompactBlockIndexIdsPath() const;
     fs::path CompactBlockIndexDeltaPath() const;
     fs::path CompactBlockIndexDeltaLogPath() const;
+    fs::path CompactBlockIndexDeltaPendingPath() const;
     void AssignCompactIdsDeterministic(const std::vector<CBlockIndex*>& sorted)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool OpenCompactBlockIndexMapped()
@@ -399,7 +400,19 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool OpenCompactBlockIndexDeltaLog(bool create)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    bool PersistCompactBlockIndexDeltaLog(const std::vector<const CBlockIndex*>& blockinfo)
+    bool BuildCompactBlockIndexDeltaLogRecords(
+        const std::vector<const CBlockIndex*>& blockinfo,
+        std::vector<CompactBlockIndexDeltaLogRecord>& updates)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool StageCompactBlockIndexDeltaPending(const std::vector<const CBlockIndex*>& blockinfo)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool PublishCompactBlockIndexDeltaPending()
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool ReconcileCompactBlockIndexDeltaPending()
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool ClearCompactBlockIndexDeltaPending()
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void InvalidateCompactBlockIndexDeltaOverlay()
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     BlockIndexId AllocateCompactId()
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
