@@ -8,6 +8,7 @@
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
 #include <node/blockindex_compact.h>
+#include <node/blockindex_compact_delta.h>
 #include <node/blockindex_compact_ids.h>
 #include <node/blockindex_compact_lookup.h>
 #include <node/blockindex_compact_store.h>
@@ -96,6 +97,7 @@ BOOST_AUTO_TEST_CASE(compact_block_index_record_snapshot)
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexLookupHeader), 128U);
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexLookupSlot), 16U);
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexIdsHeader), 128U);
+    BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexDeltaHeader), 128U);
     if constexpr (sizeof(void*) == 8) {
         // m_compact_id consumes the former alignment padding before the payload
         // pointer; generation-2 preparation must not grow the balanced shell.
@@ -148,6 +150,63 @@ BOOST_AUTO_TEST_CASE(compact_block_index_mapped_store)
     BOOST_CHECK_EQUAL(got_second->record.parent, 0U);
     BOOST_CHECK(store.Get(node::INVALID_BLOCK_INDEX_ID) == nullptr);
     BOOST_CHECK(store.Get(2) == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(compact_block_index_metadata_delta_snapshot)
+{
+    const fs::path delta_path{m_path_root / "compact-index-delta.dat"};
+    const uint256 genesis{Params().GetConsensus().hashGenesisBlock};
+    std::string error;
+
+    std::vector<node::CompactBlockIndexEntry> entries(3);
+    entries[0].hash = uint256S("11");
+    entries[0].record.height = 100;
+    entries[0].record.parent = 9;
+    entries[1].hash = uint256S("12");
+    entries[1].record.height = 101;
+    entries[1].record.parent = 10;
+    entries[2].hash = uint256S("13");
+    entries[2].record.height = 102;
+    entries[2].record.parent = 11;
+
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexDelta::Build(
+            delta_path,
+            /*base_generation=*/7,
+            /*base_entry_count=*/10,
+            genesis,
+            entries,
+            error),
+        "failed to build compact metadata delta: " << error);
+
+    node::CompactBlockIndexDelta delta;
+    BOOST_REQUIRE_MESSAGE(
+        delta.Open(
+            delta_path,
+            /*expected_base_generation=*/7,
+            /*expected_base_entry_count=*/10,
+            genesis,
+            error),
+        "failed to open compact metadata delta: " << error);
+
+    BOOST_CHECK(delta.IsOpen());
+    BOOST_CHECK_EQUAL(delta.BaseEntryCount(), 10U);
+    BOOST_CHECK_EQUAL(delta.TailEntryCount(), entries.size());
+    BOOST_CHECK_EQUAL(
+        delta.SizeBytes(),
+        sizeof(node::CompactBlockIndexDeltaHeader) +
+            entries.size() * sizeof(node::CompactBlockIndexEntry));
+
+    BOOST_CHECK(delta.Get(9) == nullptr);
+    BOOST_REQUIRE(delta.Get(10));
+    BOOST_REQUIRE(delta.Get(11));
+    BOOST_REQUIRE(delta.Get(12));
+    BOOST_CHECK(delta.Get(13) == nullptr);
+
+    BOOST_CHECK(delta.Get(10)->hash == entries[0].hash);
+    BOOST_CHECK_EQUAL(delta.Get(10)->record.height, 100);
+    BOOST_CHECK_EQUAL(delta.Get(11)->record.parent, 10U);
+    BOOST_CHECK(delta.Get(12)->hash == entries[2].hash);
 }
 
 BOOST_AUTO_TEST_CASE(compact_block_index_persistent_ids)
