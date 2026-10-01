@@ -182,22 +182,28 @@ BOOST_AUTO_TEST_CASE(compact_block_index_metadata_delta_log)
             error),
         "failed to open compact metadata delta log: " << error);
 
-    std::vector<node::CompactBlockIndexDeltaLogRecord> records(3);
+    std::vector<node::CompactBlockIndexDeltaLogRecord> records(4);
 
-    records[0].id = 11;
-    records[0].entry.hash = uint256S("aaaa");
-    records[0].entry.record.height = 101;
+    // Immutable base records may acquire mutable status/position updates too.
+    records[0].id = 2;
+    records[0].entry.hash = uint256S("9999");
+    records[0].entry.record.height = 2;
+    records[0].entry.record.status = BLOCK_VALID_TREE;
 
-    // Same id again: replay order deliberately permits metadata replacement.
     records[1].id = 11;
     records[1].entry.hash = uint256S("aaaa");
     records[1].entry.record.height = 101;
-    records[1].entry.record.status = BLOCK_VALID_TREE;
+
+    // Same id again: replay order deliberately permits metadata replacement.
+    records[2].id = 11;
+    records[2].entry.hash = uint256S("aaaa");
+    records[2].entry.record.height = 101;
+    records[2].entry.record.status = BLOCK_VALID_TREE;
 
     // First id after the snapshot tail [10, 13).
-    records[2].id = 13;
-    records[2].entry.hash = uint256S("bbbb");
-    records[2].entry.record.height = 103;
+    records[3].id = 13;
+    records[3].entry.hash = uint256S("bbbb");
+    records[3].entry.record.height = 103;
 
     BOOST_REQUIRE_MESSAGE(log.Append(records, error), "append failed: " << error);
     BOOST_CHECK_EQUAL(log.RecordCount(), records.size());
@@ -217,11 +223,13 @@ BOOST_AUTO_TEST_CASE(compact_block_index_metadata_delta_log)
         "delta log replay failed: " << error);
 
     BOOST_REQUIRE_EQUAL(read.size(), records.size());
-    BOOST_CHECK_EQUAL(read[0].id, 11U);
+    BOOST_CHECK_EQUAL(read[0].id, 2U);
+    BOOST_CHECK_EQUAL(read[0].entry.record.status, BLOCK_VALID_TREE);
     BOOST_CHECK_EQUAL(read[1].id, 11U);
-    BOOST_CHECK_EQUAL(read[1].entry.record.status, BLOCK_VALID_TREE);
-    BOOST_CHECK_EQUAL(read[2].id, 13U);
-    BOOST_CHECK(read[2].entry.hash == uint256S("bbbb"));
+    BOOST_CHECK_EQUAL(read[2].id, 11U);
+    BOOST_CHECK_EQUAL(read[2].entry.record.status, BLOCK_VALID_TREE);
+    BOOST_CHECK_EQUAL(read[3].id, 13U);
+    BOOST_CHECK(read[3].entry.hash == uint256S("bbbb"));
 
     node::CompactBlockIndexDeltaLog reopened;
     BOOST_REQUIRE_MESSAGE(
