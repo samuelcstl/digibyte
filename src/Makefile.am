@@ -219,6 +219,10 @@ DIGIBYTE_CORE_H = \
   netmessagemaker.h \
   node/abort.h \
   node/blockmanager_args.h \
+  node/blockindex_compact.h \
+  node/blockindex_compact_ids.h \
+  node/blockindex_compact_lookup.h \
+  node/blockindex_compact_store.h \
   node/blockstorage.h \
   node/caches.h \
   node/chainstate.h \
