@@ -481,6 +481,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-blockindexcompactshadow=<mode>", "Compact historical block-index shadow store: off, build, or verify (default: off)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-blockindexcompactlookup=<mode>", "Compact historical block-index hash lookup: off, build, or verify (default: off)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-blockindexcompactids=<mode>", "Compact block-index persistent id tail: off, build, or verify (default: off)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-blockindexcompactdelta=<mode>", "Compact block-index metadata delta snapshot: off, build, or verify (default: off)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
 #if HAVE_SYSTEM
     argsman.AddArg("-blocknotify=<cmd>", "Execute command when the best block changes (%s in cmd is replaced by block hash)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #endif
