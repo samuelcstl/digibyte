@@ -8,6 +8,7 @@
 #include <chain.h>
 #include <dbwrapper.h>
 #include <kernel/blockmanager_opts.h>
+#include <node/blockindex_compact_ids.h>
 #include <node/blockindex_compact_lookup.h>
 #include <node/blockindex_compact_store.h>
 #include <kernel/chain.h>
@@ -371,6 +372,7 @@ private:
 
     fs::path CompactBlockIndexShadowPath() const;
     fs::path CompactBlockIndexLookupPath() const;
+    fs::path CompactBlockIndexIdsPath() const;
     void AssignCompactIdsDeterministic(const std::vector<CBlockIndex*>& sorted)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool OpenCompactBlockIndexMapped()
@@ -382,6 +384,10 @@ private:
     bool BuildCompactBlockIndexLookup()
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool VerifyCompactBlockIndexLookup()
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool RestoreCompactIds(const std::vector<CBlockIndex*>& sorted, bool allow_create)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool PersistCompactIds(const std::vector<const CBlockIndex*>& blockinfo)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     BlockIndexId AllocateCompactId()
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -500,6 +506,7 @@ public:
     BlockIndexStore m_block_index GUARDED_BY(cs_main);
     std::unique_ptr<CompactBlockIndexStore> m_compact_block_index GUARDED_BY(cs_main);
     std::unique_ptr<CompactBlockIndexLookup> m_compact_block_lookup GUARDED_BY(cs_main);
+    std::unique_ptr<CompactBlockIndexIds> m_compact_block_ids GUARDED_BY(cs_main);
 
     // Next process-local compact id. Startup restores/assigns the historical
     // namespace, while clean IBD/reindex naturally starts at zero.
