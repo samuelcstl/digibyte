@@ -33,6 +33,7 @@
 #include <validation.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <unordered_map>
@@ -2340,11 +2341,23 @@ bool BlockManager::WriteBlockIndexDB()
         }
     }
 
+    if (metadata_staged &&
+        m_opts.block_index_compact_fault == kernel::BlockIndexCompactFaultMode::AFTER_PENDING) {
+        LogPrintf("Compact block index: fault injection after pending metadata batch; terminating before legacy LevelDB commit\n");
+        std::_Exit(85);
+    }
+
     if (!m_block_tree_db->WriteBatchSync(vFiles, max_blockfile, vBlocks)) {
         if (metadata_staged && !ClearCompactBlockIndexDeltaPending()) {
             LogPrintf("Compact block index: metadata pending batch remains after failed legacy commit; startup will reconcile it\n");
         }
         return false;
+    }
+
+    if (metadata_staged &&
+        m_opts.block_index_compact_fault == kernel::BlockIndexCompactFaultMode::AFTER_LEVELDB) {
+        LogPrintf("Compact block index: fault injection after legacy LevelDB commit; terminating before metadata log publish\n");
+        std::_Exit(86);
     }
 
     // The ordinary upstream block index is canonical. Only after its atomic

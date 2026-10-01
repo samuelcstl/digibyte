@@ -421,9 +421,16 @@ allowing later verify mode to trust an overlay that missed a canonical update.
 ### Remaining crash-consistency and lifecycle work
 
 The next gate is deliberate fault injection around the staged batch, canonical
-LevelDB commit and delta-log publish boundaries. It must prove both outcomes:
-an uncommitted staged batch is discarded, while a committed-but-unpublished
-batch is recovered exactly once modulo harmless last-write-wins duplicates.
+LevelDB commit and delta-log publish boundaries. The debug-only
+`-blockindexcompactfault=after-pending|after-leveldb` switch terminates the
+process at those exact boundaries so the two recovery outcomes can be tested
+without timing-dependent external signals. Recovery is run with persistent ids
+in build mode so a pre-LevelDB crash can first truncate any unpublished id
+suffix.
+
+The test must prove both outcomes: an uncommitted staged batch is discarded,
+while a committed-but-unpublished batch is recovered exactly once modulo
+harmless last-write-wins duplicates.
 
 Still required:
 

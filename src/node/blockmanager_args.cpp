@@ -99,6 +99,18 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, BlockManager::Op
         }
     }
 
+    if (auto value{args.GetArg("-blockindexcompactfault")}) {
+        if (*value == "off") {
+            opts.block_index_compact_fault = kernel::BlockIndexCompactFaultMode::OFF;
+        } else if (*value == "after-pending") {
+            opts.block_index_compact_fault = kernel::BlockIndexCompactFaultMode::AFTER_PENDING;
+        } else if (*value == "after-leveldb") {
+            opts.block_index_compact_fault = kernel::BlockIndexCompactFaultMode::AFTER_LEVELDB;
+        } else {
+            return util::Error{strprintf(Untranslated("Invalid -blockindexcompactfault=%s (expected off, after-pending, or after-leveldb)"), *value)};
+        }
+    }
+
     return {};
 }
 } // namespace node
