@@ -221,6 +221,7 @@ DIGIBYTE_CORE_H = \
   node/blockmanager_args.h \
   node/blockindex_compact.h \
   node/blockindex_compact_delta.h \
+  node/blockindex_compact_delta_log.h \
   node/blockindex_compact_ids.h \
   node/blockindex_compact_lookup.h \
   node/blockindex_compact_store.h \
@@ -430,6 +431,7 @@ libdigibyte_node_a_SOURCES = \
   node/abort.cpp \
   node/blockmanager_args.cpp \
   node/blockindex_compact_delta.cpp \
+  node/blockindex_compact_delta_log.cpp \
   node/blockindex_compact_ids.cpp \
   node/blockindex_compact_lookup.cpp \
   node/blockindex_compact_store.cpp \
