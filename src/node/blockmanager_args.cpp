@@ -75,6 +75,18 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, BlockManager::Op
         }
     }
 
+    if (auto value{args.GetArg("-blockindexcompactids")}) {
+        if (*value == "off") {
+            opts.block_index_compact_ids = kernel::BlockIndexCompactIdsMode::OFF;
+        } else if (*value == "build") {
+            opts.block_index_compact_ids = kernel::BlockIndexCompactIdsMode::BUILD;
+        } else if (*value == "verify") {
+            opts.block_index_compact_ids = kernel::BlockIndexCompactIdsMode::VERIFY;
+        } else {
+            return util::Error{strprintf(Untranslated("Invalid -blockindexcompactids=%s (expected off, build, or verify)"), *value)};
+        }
+    }
+
     return {};
 }
 } // namespace node
