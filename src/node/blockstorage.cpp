@@ -360,6 +360,11 @@ fs::path BlockManager::CompactBlockIndexDeltaPath() const
     return m_opts.blocks_dir / "index.compact.delta";
 }
 
+fs::path BlockManager::CompactBlockIndexDeltaLogPath() const
+{
+    return m_opts.blocks_dir / "index.compact.delta.log";
+}
+
 bool BlockManager::OpenCompactBlockIndexMapped()
 {
     AssertLockHeld(cs_main);
