@@ -8,6 +8,7 @@
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
 #include <node/blockindex_compact.h>
+#include <node/blockindex_compact_ids.h>
 #include <node/blockindex_compact_lookup.h>
 #include <node/blockindex_compact_store.h>
 #include <node/miner.h>
@@ -94,6 +95,7 @@ BOOST_AUTO_TEST_CASE(compact_block_index_record_snapshot)
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexFileHeader), 128U);
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexLookupHeader), 128U);
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexLookupSlot), 16U);
+    BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexIdsHeader), 128U);
     if constexpr (sizeof(void*) == 8) {
         // m_compact_id consumes the former alignment padding before the payload
         // pointer; generation-2 preparation must not grow the balanced shell.
@@ -146,6 +148,72 @@ BOOST_AUTO_TEST_CASE(compact_block_index_mapped_store)
     BOOST_CHECK_EQUAL(got_second->record.parent, 0U);
     BOOST_CHECK(store.Get(node::INVALID_BLOCK_INDEX_ID) == nullptr);
     BOOST_CHECK(store.Get(2) == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(compact_block_index_persistent_ids)
+{
+    const fs::path ids_path{m_path_root / "compact-index-ids.dat"};
+    const uint256 genesis{Params().GetConsensus().hashGenesisBlock};
+    std::string error;
+
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexIds::Create(
+            ids_path,
+            /*base_generation=*/7,
+            /*base_entry_count=*/3,
+            genesis,
+            error),
+        "failed to create compact id tail: " << error);
+
+    node::CompactBlockIndexIds ids;
+    BOOST_REQUIRE_MESSAGE(
+        ids.Open(ids_path, 7, 3, genesis, error),
+        "failed to open compact id tail: " << error);
+
+    BOOST_CHECK(ids.IsOpen());
+    BOOST_CHECK_EQUAL(ids.BaseEntryCount(), 3U);
+    BOOST_CHECK_EQUAL(ids.TailEntryCount(), 0U);
+    BOOST_CHECK_EQUAL(ids.NextId(), 3U);
+
+    const std::vector<uint256> hashes{
+        uint256S("04"),
+        uint256S("05"),
+        uint256S("06"),
+    };
+    BOOST_REQUIRE_MESSAGE(ids.Append(hashes, error), "append failed: " << error);
+    BOOST_CHECK_EQUAL(ids.TailEntryCount(), 3U);
+    BOOST_CHECK_EQUAL(ids.NextId(), 6U);
+    BOOST_CHECK_EQUAL(
+        ids.SizeBytes(),
+        sizeof(node::CompactBlockIndexIdsHeader) +
+            hashes.size() * sizeof(uint256));
+
+    std::vector<std::pair<BlockIndexId, uint256>> read;
+    BOOST_REQUIRE_MESSAGE(
+        ids.ForEachTail(
+            [&](BlockIndexId id, const uint256& hash) {
+                read.emplace_back(id, hash);
+                return true;
+            },
+            error),
+        "tail read failed: " << error);
+
+    BOOST_REQUIRE_EQUAL(read.size(), hashes.size());
+    for (size_t i = 0; i < hashes.size(); ++i) {
+        BOOST_CHECK_EQUAL(read[i].first, static_cast<BlockIndexId>(3 + i));
+        BOOST_CHECK(read[i].second == hashes[i]);
+    }
+
+    BOOST_REQUIRE_MESSAGE(ids.TruncateTail(2, error), "truncate failed: " << error);
+    BOOST_CHECK_EQUAL(ids.TailEntryCount(), 2U);
+    BOOST_CHECK_EQUAL(ids.NextId(), 5U);
+
+    node::CompactBlockIndexIds reopened;
+    BOOST_REQUIRE_MESSAGE(
+        reopened.Open(ids_path, 7, 3, genesis, error),
+        "reopen failed: " << error);
+    BOOST_CHECK_EQUAL(reopened.TailEntryCount(), 2U);
+    BOOST_CHECK_EQUAL(reopened.NextId(), 5U);
 }
 
 BOOST_AUTO_TEST_CASE(compact_block_index_persistent_lookup)
