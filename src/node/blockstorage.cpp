@@ -1507,6 +1507,25 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
         break;
     }
 
+    switch (m_opts.block_index_compact_ids) {
+    case kernel::BlockIndexCompactIdsMode::OFF:
+        break;
+    case kernel::BlockIndexCompactIdsMode::BUILD:
+        if (!RestoreCompactIds(vSortedByHeight, /*allow_create=*/true)) {
+            LogPrintf("Compact block index: persistent id build/restore failed; continuing with process-local ids\n");
+            AssignCompactIdsDeterministic(vSortedByHeight);
+            m_compact_block_ids.reset();
+        }
+        break;
+    case kernel::BlockIndexCompactIdsMode::VERIFY:
+        if (!RestoreCompactIds(vSortedByHeight, /*allow_create=*/false)) {
+            LogPrintf("Compact block index: persistent id verification failed; continuing with process-local ids\n");
+            AssignCompactIdsDeterministic(vSortedByHeight);
+            m_compact_block_ids.reset();
+        }
+        break;
+    }
+
     switch (m_opts.block_index_compact_lookup) {
     case kernel::BlockIndexCompactLookupMode::OFF:
         break;
@@ -1544,6 +1563,12 @@ bool BlockManager::WriteBlockIndexDB()
         m_dirty_blockindex.erase(it++);
     }
     int max_blockfile = WITH_LOCK(cs_LastBlockFile, return this->MaxBlockfileNum());
+    // Publish compact ids before the corresponding upstream block-index batch.
+    // If a crash happens after this fsync but before LevelDB commits, startup
+    // recognizes and truncates the unpublished id suffix in BUILD mode.
+    if (!PersistCompactIds(vBlocks)) {
+        return false;
+    }
     if (!m_block_tree_db->WriteBatchSync(vFiles, max_blockfile, vBlocks)) {
         return false;
     }
