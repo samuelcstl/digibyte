@@ -204,9 +204,8 @@ bool CompactBlockIndexDeltaLog::Append(
     }
 
     for (const CompactBlockIndexDeltaLogRecord& record : records) {
-        if (record.id == INVALID_BLOCK_INDEX_ID ||
-            static_cast<uint64_t>(record.id) < m_header.base_entry_count) {
-            error = "compact metadata delta log append contains invalid/base id";
+        if (record.id == INVALID_BLOCK_INDEX_ID) {
+            error = "compact metadata delta log append contains invalid id";
             return false;
         }
     }
