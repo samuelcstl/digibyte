@@ -1121,15 +1121,65 @@ bool BlockManager::VerifyCompactBlockIndexDelta()
         return false;
     }
 
-    const uint64_t tail_count{m_compact_block_delta->TailEntryCount()};
-    if (base_entry_count + tail_count != m_next_compact_id) {
-        LogPrintf("Compact block index: metadata delta namespace mismatch base=%u tail=%u next=%u\n",
-                  base_entry_count, tail_count, m_next_compact_id);
+    const uint64_t snapshot_tail_count{m_compact_block_delta->TailEntryCount()};
+    const uint64_t snapshot_next{base_entry_count + snapshot_tail_count};
+    if (snapshot_next > m_next_compact_id) {
+        LogPrintf("Compact block index: metadata delta snapshot newer than id namespace base=%u tail=%u next=%u\n",
+                  base_entry_count, snapshot_tail_count, m_next_compact_id);
         return false;
     }
 
+    if (!m_compact_block_delta_log || !m_compact_block_delta_log->IsOpen()) {
+        if (!OpenCompactBlockIndexDeltaLog(/*create=*/false)) {
+            return false;
+        }
+    }
+
     const auto start{SteadyClock::now()};
-    for (uint64_t offset = 0; offset < tail_count; ++offset) {
+
+    // Last published update wins. Keep only the sparse overlay in memory so
+    // base-generation updates do not require a 24-million-entry RAM vector.
+    std::unordered_map<BlockIndexId, CompactBlockIndexEntry> overlay;
+    overlay.reserve(static_cast<size_t>(m_compact_block_delta_log->RecordCount()));
+
+    uint64_t replayed{0};
+    std::string error;
+    bool replay_invalid{false};
+    if (!m_compact_block_delta_log->ForEach(
+            [&](const CompactBlockIndexDeltaLogRecord& update) {
+                if (static_cast<uint64_t>(update.id) >= m_next_compact_id) {
+                    LogPrintf("Compact block index: metadata delta log references unpublished id=%u next=%u\n",
+                              update.id, m_next_compact_id);
+                    replay_invalid = true;
+                    return false;
+                }
+
+                CBlockIndex* index{LookupBlockIndex(update.entry.hash)};
+                if (!index || index->m_compact_id != update.id) {
+                    LogPrintf("Compact block index: metadata delta log identity mismatch id=%u hash=%s\n",
+                              update.id, update.entry.hash.ToString());
+                    replay_invalid = true;
+                    return false;
+                }
+
+                overlay[update.id] = update.entry;
+                ++replayed;
+                return true;
+            },
+            error)) {
+        LogPrintf("Compact block index: metadata delta log replay failed: %s\n",
+                  error);
+        return false;
+    }
+    if (replay_invalid) return false;
+
+    uint64_t verified_snapshot{0};
+    uint64_t verified_updates{0};
+    uint64_t verified_extensions{0};
+
+    // Verify the snapshot tail, substituting a newer logged record when one
+    // exists for the same id.
+    for (uint64_t offset = 0; offset < snapshot_tail_count; ++offset) {
         if (m_interrupt) {
             LogPrintf("Compact block index: metadata delta verification interrupted\n");
             return false;
@@ -1137,7 +1187,16 @@ bool BlockManager::VerifyCompactBlockIndexDelta()
 
         const BlockIndexId id{
             static_cast<BlockIndexId>(base_entry_count + offset)};
-        const CompactBlockIndexEntry* entry{m_compact_block_delta->Get(id)};
+        const CompactBlockIndexEntry* entry{nullptr};
+
+        const auto update{overlay.find(id)};
+        if (update != overlay.end()) {
+            entry = &update->second;
+            ++verified_updates;
+        } else {
+            entry = m_compact_block_delta->Get(id);
+        }
+
         if (!entry) {
             LogPrintf("Compact block index: metadata delta missing id=%u\n", id);
             return false;
@@ -1160,12 +1219,82 @@ bool BlockManager::VerifyCompactBlockIndexDelta()
                       id, index->nHeight, index->GetBlockHash().ToString());
             return false;
         }
+        ++verified_snapshot;
     }
 
-    LogPrintf("Compact block index: verified metadata delta base=%u tail=%u bytes=%u in %d ms\n",
+    // Every id learned after the snapshot must have a full logged record.
+    for (uint64_t raw_id = snapshot_next; raw_id < m_next_compact_id; ++raw_id) {
+        if (m_interrupt) {
+            LogPrintf("Compact block index: metadata delta extension verification interrupted\n");
+            return false;
+        }
+
+        const BlockIndexId id{static_cast<BlockIndexId>(raw_id)};
+        const auto update{overlay.find(id)};
+        if (update == overlay.end()) {
+            LogPrintf("Compact block index: metadata delta log missing extension id=%u\n",
+                      id);
+            return false;
+        }
+
+        const CompactBlockIndexEntry& entry{update->second};
+        CBlockIndex* index{LookupBlockIndex(entry.hash)};
+        if (!index || index->m_compact_id != id) {
+            LogPrintf("Compact block index: metadata delta extension identity mismatch id=%u hash=%s\n",
+                      id, entry.hash.ToString());
+            return false;
+        }
+
+        const BlockIndexId parent_id{
+            index->pprev ? index->pprev->m_compact_id : INVALID_BLOCK_INDEX_ID};
+        const BlockIndexId skip_id{
+            index->pskip ? index->pskip->m_compact_id : INVALID_BLOCK_INDEX_ID};
+
+        if (!entry.record.MatchesBlockIndex(*index, parent_id, skip_id)) {
+            LogPrintf("Compact block index: metadata delta extension mismatch id=%u height=%d hash=%s\n",
+                      id, index->nHeight, index->GetBlockHash().ToString());
+            return false;
+        }
+        ++verified_extensions;
+    }
+
+    // Logged updates to immutable-base ids are sparse. Verify their latest
+    // state separately; untouched base records remain owned by index.compact.
+    for (const auto& [id, entry] : overlay) {
+        if (static_cast<uint64_t>(id) >= base_entry_count) continue;
+
+        CBlockIndex* index{LookupBlockIndex(entry.hash)};
+        if (!index || index->m_compact_id != id) {
+            LogPrintf("Compact block index: metadata base overlay identity mismatch id=%u hash=%s\n",
+                      id, entry.hash.ToString());
+            return false;
+        }
+
+        const BlockIndexId parent_id{
+            index->pprev ? index->pprev->m_compact_id : INVALID_BLOCK_INDEX_ID};
+        const BlockIndexId skip_id{
+            index->pskip ? index->pskip->m_compact_id : INVALID_BLOCK_INDEX_ID};
+
+        if (!entry.record.MatchesBlockIndex(*index, parent_id, skip_id)) {
+            LogPrintf("Compact block index: metadata base overlay mismatch id=%u height=%d hash=%s\n",
+                      id, index->nHeight, index->GetBlockHash().ToString());
+            return false;
+        }
+        ++verified_updates;
+    }
+
+    LogPrintf("Compact block index: verified metadata delta base=%u snapshot_tail=%u next=%u log_records=%u replayed=%u overlay=%u snapshot=%u updates=%u extensions=%u bytes=%u log_bytes=%u in %d ms\n",
               base_entry_count,
-              tail_count,
+              snapshot_tail_count,
+              m_next_compact_id,
+              m_compact_block_delta_log->RecordCount(),
+              replayed,
+              overlay.size(),
+              verified_snapshot,
+              verified_updates,
+              verified_extensions,
               m_compact_block_delta->SizeBytes(),
+              m_compact_block_delta_log->SizeBytes(),
               Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
     return true;
 }
