@@ -893,6 +893,65 @@ bool BlockManager::PersistCompactIds(
     return true;
 }
 
+bool BlockManager::OpenCompactBlockIndexDeltaLog(bool create)
+{
+    AssertLockHeld(cs_main);
+
+    if (!m_compact_block_delta || !m_compact_block_delta->IsOpen()) {
+        LogPrintf("Compact block index: cannot open metadata delta log without delta snapshot\n");
+        return false;
+    }
+
+    uint64_t base_generation{0};
+    const fs::path compact_path{CompactBlockIndexShadowPath()};
+    if (fs::exists(compact_path)) {
+        if (!OpenCompactBlockIndexMapped()) {
+            LogPrintf("Compact block index: cannot bind metadata delta log because compact base is unusable\n");
+            return false;
+        }
+        base_generation = m_compact_block_index->Header()->generation;
+    }
+
+    const uint64_t base_entry_count{m_compact_block_delta->BaseEntryCount()};
+    const uint64_t snapshot_tail_entry_count{m_compact_block_delta->TailEntryCount()};
+    const fs::path path{CompactBlockIndexDeltaLogPath()};
+    std::string error;
+
+    if (create) {
+        if (!CompactBlockIndexDeltaLog::Create(
+                path,
+                base_generation,
+                base_entry_count,
+                snapshot_tail_entry_count,
+                GetConsensus().hashGenesisBlock,
+                error)) {
+            LogPrintf("Compact block index: failed creating metadata delta log %s: %s\n",
+                      fs::PathToString(path), error);
+            return false;
+        }
+    }
+
+    auto log = std::make_unique<CompactBlockIndexDeltaLog>();
+    if (!log->Open(
+            path,
+            base_generation,
+            base_entry_count,
+            snapshot_tail_entry_count,
+            GetConsensus().hashGenesisBlock,
+            error)) {
+        LogPrintf("Compact block index: cannot open metadata delta log %s: %s\n",
+                  fs::PathToString(path), error);
+        return false;
+    }
+
+    LogPrintf("Compact block index: opened metadata delta log records=%u bytes=%u path=%s\n",
+              log->RecordCount(),
+              log->SizeBytes(),
+              fs::PathToString(path));
+    m_compact_block_delta_log = std::move(log);
+    return true;
+}
+
 bool BlockManager::BuildCompactBlockIndexDelta(
     const std::vector<CBlockIndex*>& sorted)
 {
@@ -1017,6 +1076,10 @@ bool BlockManager::BuildCompactBlockIndexDelta(
               Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
 
     m_compact_block_delta = std::move(delta);
+    if (!OpenCompactBlockIndexDeltaLog(/*create=*/true)) {
+        m_compact_block_delta.reset();
+        return false;
+    }
     return true;
 }
 
