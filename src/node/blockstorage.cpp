@@ -2337,7 +2337,7 @@ bool BlockManager::WriteBlockIndexDB()
             ClearCompactBlockIndexDeltaPending();
             InvalidateCompactBlockIndexDeltaOverlay();
         } else {
-            metadata_staged = true;
+            metadata_staged = fs::exists(CompactBlockIndexDeltaPendingPath());
         }
     }
 
