@@ -80,6 +80,7 @@ public:
     [[nodiscard]] uint64_t BaseGeneration() const noexcept { return m_header.base_generation; }
     [[nodiscard]] uint64_t BaseEntryCount() const noexcept { return m_header.base_entry_count; }
     [[nodiscard]] uint64_t SnapshotTailEntryCount() const noexcept { return m_header.snapshot_tail_entry_count; }
+    [[nodiscard]] const uint256& GenesisHash() const noexcept { return m_header.genesis_hash; }
     [[nodiscard]] uint64_t RecordCount() const noexcept { return m_header.record_count; }
     [[nodiscard]] uint64_t SizeBytes() const noexcept
     {

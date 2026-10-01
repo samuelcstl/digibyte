@@ -6,6 +6,7 @@
 #define DIGIBYTE_NODE_BLOCKINDEX_COMPACT_DELTA_H
 
 #include <node/blockindex_compact.h>
+#include <node/blockindex_compact_delta_log.h>
 #include <uint256.h>
 #include <util/fs.h>
 
@@ -39,6 +40,12 @@ struct CompactBlockIndexDeltaHeader
 };
 
 static_assert(sizeof(CompactBlockIndexDeltaHeader) == 128);
+
+struct CompactBlockIndexDeltaCompaction
+{
+    std::vector<CompactBlockIndexEntry> tail_entries;
+    std::vector<CompactBlockIndexDeltaLogRecord> base_updates;
+};
 
 /**
  * Full-metadata compact tail for ids after an immutable compact generation.
@@ -76,7 +83,27 @@ public:
 
     void Close();
 
+    /**
+     * Prepare a deterministic compacted state without publishing files.
+     *
+     * Tail ids are folded into a complete new checkpoint. Sparse updates to
+     * immutable-base ids cannot be represented in that checkpoint, so only the
+     * latest record for each such id is retained as the new base overlay.
+     *
+     * The caller must publish the resulting checkpoint/log pair atomically.
+     */
+    static bool PlanCompaction(
+        const CompactBlockIndexDelta& snapshot,
+        const CompactBlockIndexDeltaLog& log,
+        uint64_t expected_next_id,
+        CompactBlockIndexDeltaCompaction& result,
+        std::string& error);
+
     [[nodiscard]] bool IsOpen() const noexcept { return m_entries != nullptr; }
+    [[nodiscard]] uint64_t BaseGeneration() const noexcept
+    {
+        return m_header ? m_header->base_generation : 0;
+    }
     [[nodiscard]] uint64_t BaseEntryCount() const noexcept
     {
         return m_header ? m_header->base_entry_count : 0;
@@ -86,6 +113,11 @@ public:
         return m_header ? m_header->tail_entry_count : 0;
     }
     [[nodiscard]] uint64_t SizeBytes() const noexcept { return m_size_bytes; }
+    [[nodiscard]] const uint256& GenesisHash() const noexcept
+    {
+        static const uint256 null_hash{};
+        return m_header ? m_header->genesis_hash : null_hash;
+    }
 
     [[nodiscard]] const CompactBlockIndexEntry* Get(BlockIndexId id) const noexcept
     {

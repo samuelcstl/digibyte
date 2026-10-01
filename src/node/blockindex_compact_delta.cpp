@@ -9,8 +9,10 @@
 
 #include <util/fs_helpers.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <exception>
+#include <unordered_map>
 
 namespace node {
 
@@ -152,6 +154,89 @@ bool CompactBlockIndexDelta::Open(
         Close();
         return false;
     }
+}
+
+bool CompactBlockIndexDelta::PlanCompaction(
+    const CompactBlockIndexDelta& snapshot,
+    const CompactBlockIndexDeltaLog& log,
+    uint64_t expected_next_id,
+    CompactBlockIndexDeltaCompaction& result,
+    std::string& error)
+{
+    result = {};
+
+    if (!snapshot.IsOpen() || !log.IsOpen()) {
+        error = "compact metadata compaction source is not open";
+        return false;
+    }
+
+    if (snapshot.BaseGeneration() != log.BaseGeneration() ||
+        snapshot.BaseEntryCount() != log.BaseEntryCount() ||
+        snapshot.TailEntryCount() != log.SnapshotTailEntryCount() ||
+        snapshot.GenesisHash() != log.GenesisHash()) {
+        error = "compact metadata compaction source binding mismatch";
+        return false;
+    }
+
+    const uint64_t base_count{snapshot.BaseEntryCount()};
+    const uint64_t snapshot_next{base_count + snapshot.TailEntryCount()};
+    if (expected_next_id < snapshot_next ||
+        expected_next_id >= static_cast<uint64_t>(INVALID_BLOCK_INDEX_ID)) {
+        error = "compact metadata compaction next id is outside valid range";
+        return false;
+    }
+
+    std::unordered_map<BlockIndexId, CompactBlockIndexDeltaLogRecord> latest;
+    latest.reserve(static_cast<size_t>(log.RecordCount()));
+
+    if (!log.ForEach(
+            [&](const CompactBlockIndexDeltaLogRecord& record) {
+                if (static_cast<uint64_t>(record.id) >= expected_next_id) {
+                    error = "compact metadata compaction log references unpublished id";
+                    return false;
+                }
+                latest[record.id] = record;
+                return true;
+            },
+            error)) {
+        if (error.empty()) {
+            error = "compact metadata compaction log replay failed";
+        }
+        return false;
+    }
+
+    result.tail_entries.reserve(static_cast<size_t>(expected_next_id - base_count));
+    for (uint64_t raw_id = base_count; raw_id < expected_next_id; ++raw_id) {
+        const BlockIndexId id{static_cast<BlockIndexId>(raw_id)};
+        const auto update{latest.find(id)};
+        if (update != latest.end()) {
+            result.tail_entries.push_back(update->second.entry);
+            continue;
+        }
+
+        const CompactBlockIndexEntry* snapshot_entry{snapshot.Get(id)};
+        if (!snapshot_entry) {
+            error = "compact metadata compaction is missing a tail extension";
+            result = {};
+            return false;
+        }
+        result.tail_entries.push_back(*snapshot_entry);
+    }
+
+    for (const auto& [id, record] : latest) {
+        if (static_cast<uint64_t>(id) < base_count) {
+            result.base_updates.push_back(record);
+        }
+    }
+    std::sort(
+        result.base_updates.begin(),
+        result.base_updates.end(),
+        [](const CompactBlockIndexDeltaLogRecord& a,
+           const CompactBlockIndexDeltaLogRecord& b) {
+            return a.id < b.id;
+        });
+
+    return true;
 }
 
 void CompactBlockIndexDelta::Close()

@@ -445,7 +445,10 @@ retained for regression testing of these transaction boundaries.
 
 Still required:
 
-- periodic folding/checkpointing so the append log remains bounded;
+- publish a crash-safe compacted checkpoint/log pair. Tail records and tail
+  updates fold into the new full delta checkpoint, while only the latest sparse
+  update for each immutable-base id remains in the fresh log until generation
+  rollover can absorb it;
 - lookup updates for newly appended ids, with bounded rebuild/resize policy;
 - active-tip/best-header identity and generation metadata;
 - generation rollover that preserves every existing compact id;
@@ -453,11 +456,14 @@ Still required:
 - no full-history scan/rewrite for ordinary tip growth.
 
 The implemented base + checkpoint + sparse-overlay model remains the intended
-architecture. Crash recovery is now proven. The next storage-lifecycle gate is
-bounded checkpoint/log compaction, followed by lookup-tail maintenance and
-generation rollover. After those are proven, the next major phase is converting
-long-lived pointer owners to ids/leases so cold historical `CBlockIndex`
-objects can stop existing permanently in anonymous memory.
+architecture. Crash recovery is now proven. The compaction planner now defines
+the fold precisely: all tail state becomes a new complete delta checkpoint,
+while last-write-wins updates to immutable-base ids remain as a deduplicated
+sparse overlay. The next storage-lifecycle gate is crash-safe publication of
+that checkpoint/log pair, followed by lookup-tail maintenance and generation
+rollover. After those are proven, the next major phase is converting long-lived
+pointer owners to ids/leases so cold historical `CBlockIndex` objects can stop
+existing permanently in anonymous memory.
 
 ## Pointer-owner conversion and hot leases
 

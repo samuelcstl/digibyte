@@ -301,6 +301,99 @@ BOOST_AUTO_TEST_CASE(compact_block_index_metadata_pending_batch)
     BOOST_CHECK(published[1].entry.hash == uint256S("bbbb"));
 }
 
+BOOST_AUTO_TEST_CASE(compact_block_index_metadata_delta_compaction_plan)
+{
+    const fs::path delta_path{m_path_root / "compact-index-delta-compact.dat"};
+    const fs::path log_path{m_path_root / "compact-index-delta-compact.log"};
+    const uint256 genesis{Params().GetConsensus().hashGenesisBlock};
+    std::string error;
+
+    std::vector<node::CompactBlockIndexEntry> snapshot_entries(3);
+    snapshot_entries[0].hash = uint256S("10");
+    snapshot_entries[0].record.height = 100;
+    snapshot_entries[1].hash = uint256S("11");
+    snapshot_entries[1].record.height = 101;
+    snapshot_entries[2].hash = uint256S("12");
+    snapshot_entries[2].record.height = 102;
+
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexDelta::Build(
+            delta_path, 7, 10, genesis, snapshot_entries, error),
+        error);
+
+    node::CompactBlockIndexDelta delta;
+    BOOST_REQUIRE_MESSAGE(delta.Open(delta_path, 7, 10, genesis, error), error);
+
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexDeltaLog::Create(
+            log_path, 7, 10, 3, genesis, error),
+        error);
+
+    node::CompactBlockIndexDeltaLog log;
+    BOOST_REQUIRE_MESSAGE(log.Open(log_path, 7, 10, 3, genesis, error), error);
+
+    std::vector<node::CompactBlockIndexDeltaLogRecord> updates(6);
+
+    // Base update survives compaction as a sparse overlay.
+    updates[0].id = 2;
+    updates[0].entry.hash = uint256S("02");
+    updates[0].entry.record.height = 2;
+    updates[0].entry.record.status = BLOCK_VALID_TREE;
+
+    // Two writes to the same checkpoint-tail id: last one must win.
+    updates[1].id = 11;
+    updates[1].entry.hash = uint256S("11");
+    updates[1].entry.record.height = 101;
+    updates[1].entry.record.status = BLOCK_VALID_TREE;
+
+    updates[2] = updates[1];
+    updates[2].entry.record.status = BLOCK_VALID_SCRIPTS;
+
+    // Post-checkpoint extensions.
+    updates[3].id = 13;
+    updates[3].entry.hash = uint256S("13");
+    updates[3].entry.record.height = 103;
+
+    updates[4] = updates[3];
+    updates[4].entry.record.status = BLOCK_VALID_CHAIN;
+
+    updates[5].id = 14;
+    updates[5].entry.hash = uint256S("14");
+    updates[5].entry.record.height = 104;
+
+    BOOST_REQUIRE_MESSAGE(log.Append(updates, error), error);
+
+    node::CompactBlockIndexDeltaCompaction compacted;
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexDelta::PlanCompaction(
+            delta, log, /*expected_next_id=*/15, compacted, error),
+        error);
+
+    BOOST_REQUIRE_EQUAL(compacted.tail_entries.size(), 5U);
+    BOOST_CHECK(compacted.tail_entries[0].hash == uint256S("10"));
+    BOOST_CHECK(compacted.tail_entries[1].hash == uint256S("11"));
+    BOOST_CHECK_EQUAL(
+        compacted.tail_entries[1].record.status,
+        BLOCK_VALID_SCRIPTS);
+    BOOST_CHECK(compacted.tail_entries[2].hash == uint256S("12"));
+    BOOST_CHECK(compacted.tail_entries[3].hash == uint256S("13"));
+    BOOST_CHECK_EQUAL(
+        compacted.tail_entries[3].record.status,
+        BLOCK_VALID_CHAIN);
+    BOOST_CHECK(compacted.tail_entries[4].hash == uint256S("14"));
+
+    BOOST_REQUIRE_EQUAL(compacted.base_updates.size(), 1U);
+    BOOST_CHECK_EQUAL(compacted.base_updates[0].id, 2U);
+    BOOST_CHECK(compacted.base_updates[0].entry.hash == uint256S("02"));
+
+    node::CompactBlockIndexDeltaCompaction invalid;
+    error.clear();
+    BOOST_CHECK(
+        !node::CompactBlockIndexDelta::PlanCompaction(
+            delta, log, /*expected_next_id=*/16, invalid, error));
+    BOOST_CHECK(!error.empty());
+}
+
 BOOST_AUTO_TEST_CASE(compact_block_index_metadata_delta_snapshot)
 {
     const fs::path delta_path{m_path_root / "compact-index-delta.dat"};
