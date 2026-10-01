@@ -350,6 +350,11 @@ fs::path BlockManager::CompactBlockIndexLookupPath() const
     return m_opts.blocks_dir / "index.compact.lookup";
 }
 
+fs::path BlockManager::CompactBlockIndexIdsPath() const
+{
+    return m_opts.blocks_dir / "index.compact.ids";
+}
+
 bool BlockManager::OpenCompactBlockIndexMapped()
 {
     AssertLockHeld(cs_main);
@@ -607,6 +612,241 @@ bool BlockManager::VerifyCompactBlockIndexShadow(const std::vector<CBlockIndex*>
               Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
 
     m_compact_block_index = std::move(mapped);
+    return true;
+}
+
+bool BlockManager::RestoreCompactIds(
+    const std::vector<CBlockIndex*>& sorted,
+    bool allow_create)
+{
+    AssertLockHeld(cs_main);
+
+    uint64_t base_generation{0};
+    uint64_t base_entry_count{0};
+
+    const fs::path compact_path{CompactBlockIndexShadowPath()};
+    if (fs::exists(compact_path)) {
+        if (!OpenCompactBlockIndexMapped()) {
+            LogPrintf("Compact block index: cannot restore persistent ids because compact base is unusable\n");
+            return false;
+        }
+        base_generation = m_compact_block_index->Header()->generation;
+        base_entry_count = m_compact_block_index->EntryCount();
+    }
+
+    if (base_entry_count > sorted.size()) {
+        LogPrintf("Compact block index: id base newer/larger than live index: base=%u live=%u\n",
+                  base_entry_count, sorted.size());
+        return false;
+    }
+
+    const fs::path ids_path{CompactBlockIndexIdsPath()};
+    auto ids = std::make_unique<CompactBlockIndexIds>();
+    std::string ids_error;
+
+    if (!ids->Open(
+            ids_path,
+            base_generation,
+            base_entry_count,
+            GetConsensus().hashGenesisBlock,
+            ids_error)) {
+        if (!allow_create) {
+            LogPrintf("Compact block index: cannot open persistent ids %s: %s\n",
+                      fs::PathToString(ids_path), ids_error);
+            return false;
+        }
+
+        LogPrintf("Compact block index: creating persistent ids %s base_generation=%u base=%u (%s)\n",
+                  fs::PathToString(ids_path),
+                  base_generation,
+                  base_entry_count,
+                  ids_error);
+
+        if (!CompactBlockIndexIds::Create(
+                ids_path,
+                base_generation,
+                base_entry_count,
+                GetConsensus().hashGenesisBlock,
+                ids_error) ||
+            !ids->Open(
+                ids_path,
+                base_generation,
+                base_entry_count,
+                GetConsensus().hashGenesisBlock,
+                ids_error)) {
+            LogPrintf("Compact block index: failed to create/open persistent ids: %s\n",
+                      ids_error);
+            return false;
+        }
+    }
+
+    for (CBlockIndex* index : sorted) {
+        index->m_compact_id = INVALID_BLOCK_INDEX_ID;
+    }
+
+    const auto start{SteadyClock::now()};
+
+    // The immutable compact generation owns ids [0, base_entry_count).
+    for (uint64_t raw_id = 0; raw_id < base_entry_count; ++raw_id) {
+        const BlockIndexId id{static_cast<BlockIndexId>(raw_id)};
+        const CompactBlockIndexEntry* entry{m_compact_block_index->Get(id)};
+        if (!entry) {
+            LogPrintf("Compact block index: persistent id base missing id=%u\n", id);
+            return false;
+        }
+
+        CBlockIndex* live{LookupBlockIndex(entry->hash)};
+        if (!live || live->m_compact_id != INVALID_BLOCK_INDEX_ID) {
+            LogPrintf("Compact block index: persistent id base mismatch id=%u hash=%s\n",
+                      id, entry->hash.ToString());
+            return false;
+        }
+        live->m_compact_id = id;
+    }
+
+    uint64_t valid_tail{0};
+    bool saw_missing_suffix{false};
+    bool invalid_tail{false};
+    ids_error.clear();
+
+    if (!ids->ForEachTail(
+            [&](BlockIndexId id, const uint256& hash) {
+                CBlockIndex* live{LookupBlockIndex(hash)};
+                if (!live) {
+                    saw_missing_suffix = true;
+                    return true;
+                }
+                if (saw_missing_suffix ||
+                    live->m_compact_id != INVALID_BLOCK_INDEX_ID) {
+                    invalid_tail = true;
+                    return false;
+                }
+                live->m_compact_id = id;
+                ++valid_tail;
+                return true;
+            },
+            ids_error)) {
+        LogPrintf("Compact block index: failed reading persistent id tail: %s\n",
+                  ids_error);
+        return false;
+    }
+
+    if (invalid_tail) {
+        LogPrintf("Compact block index: persistent id tail has non-suffix mismatch or duplicate\n");
+        return false;
+    }
+
+    if (saw_missing_suffix) {
+        if (!allow_create) {
+            LogPrintf("Compact block index: persistent id tail contains unpublished suffix\n");
+            return false;
+        }
+        ids_error.clear();
+        if (!ids->TruncateTail(valid_tail, ids_error)) {
+            LogPrintf("Compact block index: failed truncating unpublished id suffix: %s\n",
+                      ids_error);
+            return false;
+        }
+        LogPrintf("Compact block index: truncated unpublished id suffix tail=%u\n",
+                  valid_tail);
+    }
+
+    std::vector<uint256> missing_hashes;
+    uint64_t next_id{ids->NextId()};
+    for (CBlockIndex* index : sorted) {
+        if (index->m_compact_id != INVALID_BLOCK_INDEX_ID) continue;
+
+        if (next_id >= static_cast<uint64_t>(INVALID_BLOCK_INDEX_ID)) {
+            LogPrintf("Compact block index: persistent id space exhausted\n");
+            return false;
+        }
+
+        index->m_compact_id = static_cast<BlockIndexId>(next_id++);
+        missing_hashes.push_back(index->GetBlockHash());
+    }
+
+    if (!missing_hashes.empty() && !allow_create) {
+        LogPrintf("Compact block index: persistent ids missing %u live records\n",
+                  missing_hashes.size());
+        return false;
+    }
+
+    if (!missing_hashes.empty()) {
+        ids_error.clear();
+        if (!ids->Append(missing_hashes, ids_error)) {
+            LogPrintf("Compact block index: failed appending migrated id tail: %s\n",
+                      ids_error);
+            return false;
+        }
+    }
+
+    m_next_compact_id = ids->NextId();
+    LogPrintf("Compact block index: persistent ids restored base=%u tail=%u migrated=%u next=%u bytes=%u in %d ms\n",
+              ids->BaseEntryCount(),
+              ids->TailEntryCount(),
+              missing_hashes.size(),
+              m_next_compact_id,
+              ids->SizeBytes(),
+              Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
+
+    m_compact_block_ids = std::move(ids);
+    return true;
+}
+
+bool BlockManager::PersistCompactIds(
+    const std::vector<const CBlockIndex*>& blockinfo)
+{
+    AssertLockHeld(cs_main);
+
+    if (!m_compact_block_ids || !m_compact_block_ids->IsOpen()) {
+        return true;
+    }
+
+    const uint64_t persisted_next{m_compact_block_ids->NextId()};
+    std::vector<const CBlockIndex*> pending;
+
+    for (const CBlockIndex* index : blockinfo) {
+        if (index->m_compact_id == INVALID_BLOCK_INDEX_ID) continue;
+        if (static_cast<uint64_t>(index->m_compact_id) >= persisted_next) {
+            pending.push_back(index);
+        }
+    }
+
+    if (pending.empty()) return true;
+
+    std::sort(
+        pending.begin(),
+        pending.end(),
+        [](const CBlockIndex* a, const CBlockIndex* b) {
+            return a->m_compact_id < b->m_compact_id;
+        });
+
+    std::vector<uint256> hashes;
+    hashes.reserve(pending.size());
+    uint64_t expected_id{persisted_next};
+
+    for (const CBlockIndex* index : pending) {
+        if (index->m_compact_id != expected_id) {
+            LogPrintf("Compact block index: cannot persist non-contiguous id tail expected=%u got=%u\n",
+                      expected_id, index->m_compact_id);
+            return false;
+        }
+        hashes.push_back(index->GetBlockHash());
+        ++expected_id;
+    }
+
+    std::string error;
+    if (!m_compact_block_ids->Append(hashes, error)) {
+        LogPrintf("Compact block index: failed persisting live id tail: %s\n",
+                  error);
+        return false;
+    }
+
+    LogPrint(BCLog::BLOCKSTORAGE,
+             "Compact block index: persisted live ids count=%u next=%u bytes=%u\n",
+             hashes.size(),
+             m_compact_block_ids->NextId(),
+             m_compact_block_ids->SizeBytes());
     return true;
 }
 
