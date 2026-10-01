@@ -9,6 +9,7 @@
 #include <consensus/validation.h>
 #include <node/blockindex_compact.h>
 #include <node/blockindex_compact_delta.h>
+#include <node/blockindex_compact_delta_log.h>
 #include <node/blockindex_compact_ids.h>
 #include <node/blockindex_compact_lookup.h>
 #include <node/blockindex_compact_store.h>
@@ -98,6 +99,8 @@ BOOST_AUTO_TEST_CASE(compact_block_index_record_snapshot)
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexLookupSlot), 16U);
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexIdsHeader), 128U);
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexDeltaHeader), 128U);
+    BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexDeltaLogHeader), 128U);
+    BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexDeltaLogRecord), 168U);
     if constexpr (sizeof(void*) == 8) {
         // m_compact_id consumes the former alignment padding before the payload
         // pointer; generation-2 preparation must not grow the balanced shell.
@@ -150,6 +153,81 @@ BOOST_AUTO_TEST_CASE(compact_block_index_mapped_store)
     BOOST_CHECK_EQUAL(got_second->record.parent, 0U);
     BOOST_CHECK(store.Get(node::INVALID_BLOCK_INDEX_ID) == nullptr);
     BOOST_CHECK(store.Get(2) == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(compact_block_index_metadata_delta_log)
+{
+    const fs::path log_path{m_path_root / "compact-index-delta.log"};
+    const uint256 genesis{Params().GetConsensus().hashGenesisBlock};
+    std::string error;
+
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexDeltaLog::Create(
+            log_path,
+            /*base_generation=*/7,
+            /*base_entry_count=*/10,
+            /*snapshot_tail_entry_count=*/3,
+            genesis,
+            error),
+        "failed to create compact metadata delta log: " << error);
+
+    node::CompactBlockIndexDeltaLog log;
+    BOOST_REQUIRE_MESSAGE(
+        log.Open(
+            log_path,
+            /*expected_base_generation=*/7,
+            /*expected_base_entry_count=*/10,
+            /*expected_snapshot_tail_entry_count=*/3,
+            genesis,
+            error),
+        "failed to open compact metadata delta log: " << error);
+
+    std::vector<node::CompactBlockIndexDeltaLogRecord> records(3);
+
+    records[0].id = 11;
+    records[0].entry.hash = uint256S("aaaa");
+    records[0].entry.record.height = 101;
+
+    // Same id again: replay order deliberately permits metadata replacement.
+    records[1].id = 11;
+    records[1].entry.hash = uint256S("aaaa");
+    records[1].entry.record.height = 101;
+    records[1].entry.record.status = BLOCK_VALID_TREE;
+
+    // First id after the snapshot tail [10, 13).
+    records[2].id = 13;
+    records[2].entry.hash = uint256S("bbbb");
+    records[2].entry.record.height = 103;
+
+    BOOST_REQUIRE_MESSAGE(log.Append(records, error), "append failed: " << error);
+    BOOST_CHECK_EQUAL(log.RecordCount(), records.size());
+    BOOST_CHECK_EQUAL(
+        log.SizeBytes(),
+        sizeof(node::CompactBlockIndexDeltaLogHeader) +
+            records.size() * sizeof(node::CompactBlockIndexDeltaLogRecord));
+
+    std::vector<node::CompactBlockIndexDeltaLogRecord> read;
+    BOOST_REQUIRE_MESSAGE(
+        log.ForEach(
+            [&](const node::CompactBlockIndexDeltaLogRecord& record) {
+                read.push_back(record);
+                return true;
+            },
+            error),
+        "delta log replay failed: " << error);
+
+    BOOST_REQUIRE_EQUAL(read.size(), records.size());
+    BOOST_CHECK_EQUAL(read[0].id, 11U);
+    BOOST_CHECK_EQUAL(read[1].id, 11U);
+    BOOST_CHECK_EQUAL(read[1].entry.record.status, BLOCK_VALID_TREE);
+    BOOST_CHECK_EQUAL(read[2].id, 13U);
+    BOOST_CHECK(read[2].entry.hash == uint256S("bbbb"));
+
+    node::CompactBlockIndexDeltaLog reopened;
+    BOOST_REQUIRE_MESSAGE(
+        reopened.Open(log_path, 7, 10, 3, genesis, error),
+        "reopen failed: " << error);
+    BOOST_CHECK_EQUAL(reopened.RecordCount(), records.size());
 }
 
 BOOST_AUTO_TEST_CASE(compact_block_index_metadata_delta_snapshot)
