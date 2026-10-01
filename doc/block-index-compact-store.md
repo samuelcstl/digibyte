@@ -142,12 +142,25 @@ derived lookup header. A remote peer does not know that local key under the
 normal threat model, but the final design must document this explicitly and
 must not rely on secrecy against a local attacker.
 
-Newly learned blocks now receive monotonically increasing compact ids immediately
+Newly learned blocks receive monotonically increasing compact ids immediately
 in `AddToBlockIndex()`, including clean-IBD/reindex insertion paths. `CChain`
 also maintains a parallel compact-id vector and verifies it against the pointer
-chain at startup. This is still a shadow representation: live/tail ids are not
-yet persisted across restart, so generation/delta persistence is the next
-required step before the id vector can become authoritative.
+chain at startup.
+
+The next persistence slice is now implemented behind
+`-blockindexcompactids=build|verify`. The immutable compact generation owns
+the base id range and `blocks/index.compact.ids` stores only the append-only
+hash tail. Tail record position defines the id, so ordinary runtime growth does
+not renumber history. In build mode a stale compact generation can be paired
+with a tiny live tail; on a clean datadir with no compact base the same file
+starts at id zero and grows naturally during IBD/reindex. Runtime tail records
+are fsynced before the corresponding upstream LevelDB block-index batch, and a
+crash-only journal suffix can be detected/truncated on the next build-mode
+startup.
+
+This is identity persistence only. Full compact metadata for the live tail,
+mutable status/data-position updates, generation rollover, and compact-native
+startup remain pending before the id vector can become authoritative.
 
 Normal `LookupBlockIndex()` is still backed by the legacy map. Normal startup
 still performs the LevelDB count pass, deserializes roughly 24.3 million
@@ -316,6 +329,28 @@ ordinary compatibility database remains closer to upstream format.
 
 ## Live-update and crash-consistency work still required
 
+### Persistent identity tail
+
+`blocks/index.compact.ids` is deliberately narrower than the future mutable
+metadata delta. Its header binds it to a compact base generation/count (or to a
+zero-length base for clean IBD), and each subsequent 32-byte hash occupies the
+next compact id. The base and tail therefore form one contiguous id namespace.
+
+The write protocol is data-first: append hashes, fsync them, then advance and
+fsync the published tail count. The ordinary upstream block-index LevelDB batch
+is written afterward. If a crash happens between those two stores, build-mode
+startup can recognize a suffix whose hashes never became visible in LevelDB
+and truncate only that suffix. If a known tail hash appears after an unknown
+one, restoration rejects the file instead of guessing.
+
+This gives identity continuity without putting compact ids into
+`CDiskBlockIndex`, preserving the direction that the ordinary upstream index
+remains a compatibility/recovery source. A future generation fold must retain
+exactly these ids while moving the tail's full metadata into the next immutable
+compact generation.
+
+
+
 The verified compact file is currently a generation snapshot. The production
 store must define how new records and mutable metadata are published without
 renumbering historical ids or exposing torn state after a crash.
@@ -439,6 +474,7 @@ This section exists specifically to prevent useful experiments from being lost.
 - persisted cumulative chain work;
 - stable 32-bit historical ids;
 - process-live monotonic id allocation for newly learned blocks;
+- append-only persistent id tail for restart/clean-IBD/reindex identity continuity;
 - active-chain compact-id shadow maintained across tip changes/reorgs;
 - mmap/file-backed compact records;
 - compact exact hash lookup with full-hash verification;
@@ -446,7 +482,7 @@ This section exists specifically to prevent useful experiments from being lost.
 
 **Still pending / intended for later**
 
-- persistence of live/tail ids across restart and compact-generation rollover;
+- full compact metadata persistence for live/tail records and compact-generation rollover;
 - pointer-owner to id/lease conversion;
 - hot materialization cache and pin accounting;
 - deep-reorg prefetch;
