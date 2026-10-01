@@ -39,6 +39,12 @@ enum class BlockIndexCompactIdsMode {
     VERIFY,
 };
 
+enum class BlockIndexCompactDeltaMode {
+    OFF,
+    BUILD,
+    VERIFY,
+};
+
 static constexpr size_t DEFAULT_BLOCK_INDEX_HOT_DEPTH{40320};
 
 /**
@@ -54,6 +60,7 @@ struct BlockManagerOpts {
     BlockIndexCompactShadowMode block_index_compact_shadow{BlockIndexCompactShadowMode::OFF};
     BlockIndexCompactLookupMode block_index_compact_lookup{BlockIndexCompactLookupMode::OFF};
     BlockIndexCompactIdsMode block_index_compact_ids{BlockIndexCompactIdsMode::OFF};
+    BlockIndexCompactDeltaMode block_index_compact_delta{BlockIndexCompactDeltaMode::OFF};
     const fs::path blocks_dir;
     Notifications& notifications;
 };
