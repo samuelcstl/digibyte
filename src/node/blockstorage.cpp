@@ -906,6 +906,12 @@ bool BlockManager::BuildCompactBlockIndexDelta(
         base_entry_count = m_compact_block_index->EntryCount();
     }
 
+    if (base_entry_count > sorted.size()) {
+        LogPrintf("Compact block index: metadata delta base newer/larger than live index base=%u live=%u\n",
+                  base_entry_count, sorted.size());
+        return false;
+    }
+
     if (m_next_compact_id < base_entry_count) {
         LogPrintf("Compact block index: metadata delta id namespace precedes base next=%u base=%u\n",
                   m_next_compact_id, base_entry_count);
@@ -1768,6 +1774,24 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
             LogPrintf("Compact block index: persistent id verification failed; continuing with process-local ids\n");
             AssignCompactIdsDeterministic(vSortedByHeight);
             m_compact_block_ids.reset();
+        }
+        break;
+    }
+
+    switch (m_opts.block_index_compact_delta) {
+    case kernel::BlockIndexCompactDeltaMode::OFF:
+        break;
+    case kernel::BlockIndexCompactDeltaMode::BUILD:
+        if (!BuildCompactBlockIndexDelta(vSortedByHeight) ||
+            !VerifyCompactBlockIndexDelta()) {
+            LogPrintf("Compact block index: metadata delta build/verify failed; continuing without metadata delta\n");
+            m_compact_block_delta.reset();
+        }
+        break;
+    case kernel::BlockIndexCompactDeltaMode::VERIFY:
+        if (!VerifyCompactBlockIndexDelta()) {
+            LogPrintf("Compact block index: metadata delta verification failed; continuing without metadata delta\n");
+            m_compact_block_delta.reset();
         }
         break;
     }
