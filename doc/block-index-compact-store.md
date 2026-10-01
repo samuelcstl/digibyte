@@ -418,24 +418,33 @@ A fresh checkpoint makes any older pending batch obsolete and clears it. If
 pre-commit staging itself fails, the derived log is invalidated rather than
 allowing later verify mode to trust an overlay that missed a canonical update.
 
-### Remaining crash-consistency and lifecycle work
+### Crash-consistency validation
 
-The next gate is deliberate fault injection around the staged batch, canonical
-LevelDB commit and delta-log publish boundaries. The debug-only
-`-blockindexcompactfault=after-pending|after-leveldb` switch terminates the
-process at those exact boundaries so the two recovery outcomes can be tested
-without timing-dependent external signals. Recovery is run with persistent ids
-in build mode so a pre-LevelDB crash can first truncate any unpublished id
-suffix.
+The staged metadata protocol has now passed deterministic real-node fault
+injection at both sides of the canonical LevelDB commit boundary.
 
-The test must prove both outcomes: an uncommitted staged batch is discarded,
-while a committed-but-unpublished batch is recovered exactly once modulo
-harmless last-write-wins duplicates.
+For the pre-LevelDB case, the node terminated immediately after fsyncing a
+218-record pending metadata batch. On restart, persistent-id recovery truncated
+the unpublished id suffix, the 218-record pending batch was rejected as
+uncommitted, and the existing 14-record sparse log still verified exactly
+against the canonical legacy graph.
+
+For the post-LevelDB case, the node terminated after the canonical LevelDB
+batch committed but before the staged metadata reached the main log. The
+pending file contained 41 records (7,016 bytes) while the main log remained
+unchanged at 38,768 bytes. On restart all 41 records matched canonical state,
+were appended to the main log, and the pending file was removed. The main log
+grew to 45,656 bytes and verify mode replayed all 271 physical log records into
+a 258-entry last-write-wins overlay with exact legacy-graph equivalence.
+
+This closes the missing-append recovery window without a whole-history scan.
+The debug-only `-blockindexcompactfault=after-pending|after-leveldb` switch is
+retained for regression testing of these transaction boundaries.
+
+### Remaining lifecycle work
 
 Still required:
 
-- deterministic reconciliation of a committed LevelDB update that is missing
-  from the metadata log;
 - periodic folding/checkpointing so the append log remains bounded;
 - lookup updates for newly appended ids, with bounded rebuild/resize policy;
 - active-tip/best-header identity and generation metadata;
@@ -444,10 +453,11 @@ Still required:
 - no full-history scan/rewrite for ordinary tip growth.
 
 The implemented base + checkpoint + sparse-overlay model remains the intended
-architecture. Once crash recovery and bounded compaction are proven, the next
-major phase is converting long-lived pointer owners to ids/leases so cold
-historical `CBlockIndex` objects can stop existing permanently in anonymous
-memory.
+architecture. Crash recovery is now proven. The next storage-lifecycle gate is
+bounded checkpoint/log compaction, followed by lookup-tail maintenance and
+generation rollover. After those are proven, the next major phase is converting
+long-lived pointer owners to ids/leases so cold historical `CBlockIndex`
+objects can stop existing permanently in anonymous memory.
 
 ## Pointer-owner conversion and hot leases
 
