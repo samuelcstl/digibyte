@@ -952,6 +952,69 @@ bool BlockManager::OpenCompactBlockIndexDeltaLog(bool create)
     return true;
 }
 
+bool BlockManager::PersistCompactBlockIndexDeltaLog(
+    const std::vector<const CBlockIndex*>& blockinfo)
+{
+    AssertLockHeld(cs_main);
+
+    if (!m_compact_block_delta_log || !m_compact_block_delta_log->IsOpen()) {
+        return true;
+    }
+
+    std::vector<const CBlockIndex*> ordered;
+    ordered.reserve(blockinfo.size());
+    for (const CBlockIndex* index : blockinfo) {
+        if (index->m_compact_id == INVALID_BLOCK_INDEX_ID) continue;
+        ordered.push_back(index);
+    }
+
+    if (ordered.empty()) return true;
+
+    std::sort(
+        ordered.begin(),
+        ordered.end(),
+        [](const CBlockIndex* a, const CBlockIndex* b) {
+            return a->m_compact_id < b->m_compact_id;
+        });
+
+    std::vector<CompactBlockIndexDeltaLogRecord> updates;
+    updates.reserve(ordered.size());
+
+    for (const CBlockIndex* index : ordered) {
+        const BlockIndexId parent_id{
+            index->pprev ? index->pprev->m_compact_id : INVALID_BLOCK_INDEX_ID};
+        const BlockIndexId skip_id{
+            index->pskip ? index->pskip->m_compact_id : INVALID_BLOCK_INDEX_ID};
+
+        if ((index->pprev && parent_id == INVALID_BLOCK_INDEX_ID) ||
+            (index->pskip && skip_id == INVALID_BLOCK_INDEX_ID)) {
+            LogPrintf("Compact block index: cannot persist metadata update with unresolved linkage id=%u\n",
+                      index->m_compact_id);
+            return false;
+        }
+
+        CompactBlockIndexDeltaLogRecord update;
+        update.id = index->m_compact_id;
+        update.entry.hash = index->GetBlockHash();
+        update.entry.record = CompactBlockIndexRecord::FromBlockIndex(
+            *index, parent_id, skip_id);
+        updates.push_back(update);
+    }
+
+    std::string error;
+    if (!m_compact_block_delta_log->Append(updates, error)) {
+        LogPrintf("Compact block index: failed persisting metadata updates: %s\n",
+                  error);
+        return false;
+    }
+
+    LogPrintf("Compact block index: persisted metadata updates count=%u records=%u bytes=%u\n",
+              updates.size(),
+              m_compact_block_delta_log->RecordCount(),
+              m_compact_block_delta_log->SizeBytes());
+    return true;
+}
+
 bool BlockManager::BuildCompactBlockIndexDelta(
     const std::vector<CBlockIndex*>& sorted)
 {
@@ -2038,6 +2101,16 @@ bool BlockManager::WriteBlockIndexDB()
     }
     if (!m_block_tree_db->WriteBatchSync(vFiles, max_blockfile, vBlocks)) {
         return false;
+    }
+
+    // The ordinary upstream block index remains canonical. Publish the compact
+    // metadata overlay only after its corresponding LevelDB batch succeeds.
+    // Failure disables the derived live overlay but must not invalidate the
+    // successfully committed compatibility database.
+    if (!PersistCompactBlockIndexDeltaLog(vBlocks)) {
+        LogPrintf("Compact block index: disabling metadata delta log after persistence failure; legacy block index remains authoritative\n");
+        m_compact_block_delta_log.reset();
+        m_compact_block_delta.reset();
     }
     return true;
 }
