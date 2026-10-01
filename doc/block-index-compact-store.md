@@ -158,9 +158,27 @@ are fsynced before the corresponding upstream LevelDB block-index batch, and a
 crash-only journal suffix can be detected/truncated on the next build-mode
 startup.
 
-This is identity persistence only. Full compact metadata for the live tail,
-mutable status/data-position updates, generation rollover, and compact-native
-startup remain pending before the id vector can become authoritative.
+The next metadata slice is also implemented. `blocks/index.compact.delta`
+is a checkpoint of the full compact metadata tail beyond the immutable base,
+and `blocks/index.compact.delta.log` is a sparse append-only last-write-wins
+overlay. Logged records may update immutable-base ids, update ids already
+present in the checkpoint tail, or provide the complete metadata record for a
+newly allocated id. This is necessary because historical `CBlockIndex`
+metadata such as status and data positions can still change after the base
+generation was created.
+
+Normal block-index writes now persist any newly allocated compact ids before
+the canonical upstream LevelDB batch, commit that LevelDB batch, and only then
+append the corresponding full compact metadata records to the delta log. If
+metadata-log persistence fails after LevelDB succeeds, the derived overlay is
+disabled and the successful upstream commit remains authoritative.
+
+The delta snapshot/log format, replay, identity checks and runtime write wiring
+are covered by targeted unit tests. Real-node validation of normal network
+growth, graceful restart and replay is the next gate. Crash reconciliation,
+periodic checkpoint/log compaction, lookup-tail maintenance, generation
+rollover and compact-native startup remain pending before the compact
+representation can become authoritative.
 
 Normal `LookupBlockIndex()` is still backed by the legacy map. Normal startup
 still performs the LevelDB count pass, deserializes roughly 24.3 million
@@ -327,53 +345,79 @@ The experiment proved that persisting cumulative chain work removes roughly
 `nChainWork`, so compact-native startup can obtain the same benefit while the
 ordinary compatibility database remains closer to upstream format.
 
-## Live-update and crash-consistency work still required
+## Live-update and crash-consistency status
 
 ### Persistent identity tail
 
-`blocks/index.compact.ids` is deliberately narrower than the future mutable
-metadata delta. Its header binds it to a compact base generation/count (or to a
-zero-length base for clean IBD), and each subsequent 32-byte hash occupies the
-next compact id. The base and tail therefore form one contiguous id namespace.
+`blocks/index.compact.ids` binds an immutable compact base generation/count
+(or a zero-length base for clean IBD) to an append-only sequence of 32-byte
+hashes. Tail position defines the compact id, so the base and tail form one
+contiguous, monotonic id namespace without adding compact ids to
+`CDiskBlockIndex`.
 
-The write protocol is data-first: append hashes, fsync them, then advance and
-fsync the published tail count. The ordinary upstream block-index LevelDB batch
-is written afterward. If a crash happens between those two stores, build-mode
-startup can recognize a suffix whose hashes never became visible in LevelDB
-and truncate only that suffix. If a known tail hash appears after an unknown
-one, restoration rejects the file instead of guessing.
+The identity write protocol is data-first: append hashes, fsync them, then
+advance and fsync the published tail count before the ordinary upstream
+block-index LevelDB batch is committed. Build-mode startup can detect and
+truncate a crash-only unpublished suffix. A known tail hash appearing after an
+unknown one is rejected instead of guessed through.
 
-This gives identity continuity without putting compact ids into
-`CDiskBlockIndex`, preserving the direction that the ordinary upstream index
-remains a compatibility/recovery source. A future generation fold must retain
-exactly these ids while moving the tail's full metadata into the next immutable
-compact generation.
+### Metadata checkpoint and sparse update log
 
+The mutable metadata design has moved from proposal to implementation:
 
+- `blocks/index.compact.delta` stores a full checkpoint of compact records for
+  ids beyond the immutable base generation;
+- `blocks/index.compact.delta.log` stores sparse append-only full-record
+  updates using last-write-wins replay;
+- the log accepts updates to base ids as well as checkpoint-tail ids, because
+  pruning/validation/data-position state can change for historical records;
+- ids allocated after the checkpoint are represented by complete log records,
+  so ordinary chain growth does not require rebuilding the checkpoint;
+- verify mode overlays the latest logged record on the checkpoint, requires a
+  complete logged record for every id learned after the checkpoint, and checks
+  identity plus full-record equivalence against the canonical legacy graph.
 
-The verified compact file is currently a generation snapshot. The production
-store must define how new records and mutable metadata are published without
-renumbering historical ids or exposing torn state after a crash.
+The runtime write order is deliberately asymmetric:
 
-Requirements include:
+1. persist newly allocated stable compact ids;
+2. commit the normal upstream LevelDB block-index batch;
+3. append the corresponding full compact metadata updates.
 
-- monotonic id allocation for every newly learned block, including historical
-  side branches;
-- append/update semantics for new headers and later block-data/status changes;
-- a generation/checkpoint model or journal that makes interrupted updates
-  detectable and recoverable;
+The upstream block-index database therefore remains canonical. If step 3 fails,
+the compact delta/log is disabled rather than turning an already-successful
+legacy commit into a node failure.
+
+Targeted tests cover the delta checkpoint, append/replay semantics, persistent
+ids and runtime write integration. The next real-node gate is to create a fresh
+checkpoint/log, allow ordinary network growth to append updates/new ids, stop
+cleanly, restart in verify mode and prove that base + checkpoint + last-write-
+wins log reproduces the canonical legacy graph.
+
+### Remaining crash-consistency and lifecycle work
+
+The current post-LevelDB metadata-log ordering intentionally prefers canonical
+upstream correctness, but it leaves one recovery case to solve: a process crash
+after LevelDB commits and before the matching metadata records are appended can
+leave the derived overlay behind canonical state. Verify mode detects a missing
+extension or mismatch, but production recovery must reconcile this condition
+without requiring a whole-history rewrite.
+
+Still required:
+
+- deterministic reconciliation of a committed LevelDB update that is missing
+  from the metadata log;
+- periodic folding/checkpointing so the append log remains bounded;
 - lookup updates for newly appended ids, with bounded rebuild/resize policy;
 - active-tip/best-header identity and generation metadata;
-- safe fsync/publish ordering;
-- periodic compaction if a delta/journal design is used;
-- no requirement to scan or rewrite the complete history for ordinary tip
-  growth.
+- generation rollover that preserves every existing compact id;
+- clean-IBD and reindex maintenance of the same structures;
+- no full-history scan/rewrite for ordinary tip growth.
 
-A base-generation plus small live delta/overlay is a viable design candidate:
-the large compact generation remains immutable and mmap-friendly while recent
-changes are maintained in a small resident/persisted delta and periodically
-folded into a new generation. This is especially attractive during migration,
-but it must also scale through a clean full IBD.
+The implemented base + checkpoint + sparse-overlay model remains the intended
+architecture. Once crash recovery and bounded compaction are proven, the next
+major phase is converting long-lived pointer owners to ids/leases so cold
+historical `CBlockIndex` objects can stop existing permanently in anonymous
+memory.
 
 ## Pointer-owner conversion and hot leases
 
