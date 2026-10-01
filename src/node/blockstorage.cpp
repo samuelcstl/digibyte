@@ -798,6 +798,39 @@ bool BlockManager::PersistCompactIds(
 {
     AssertLockHeld(cs_main);
 
+    // Explicit reindex skips LoadBlockIndexDB(), so initialize a fresh
+    // zero-base identity tail lazily on the first block-index flush.
+    if ((!m_compact_block_ids || !m_compact_block_ids->IsOpen()) &&
+        m_opts.block_index_compact_ids == kernel::BlockIndexCompactIdsMode::BUILD &&
+        fReindex) {
+        const fs::path path{CompactBlockIndexIdsPath()};
+        std::string error;
+        if (!CompactBlockIndexIds::Create(
+                path,
+                /*base_generation=*/0,
+                /*base_entry_count=*/0,
+                GetConsensus().hashGenesisBlock,
+                error)) {
+            LogPrintf("Compact block index: failed creating reindex id tail: %s\n",
+                      error);
+            return false;
+        }
+
+        auto ids = std::make_unique<CompactBlockIndexIds>();
+        if (!ids->Open(
+                path,
+                /*expected_base_generation=*/0,
+                /*expected_base_entry_count=*/0,
+                GetConsensus().hashGenesisBlock,
+                error)) {
+            LogPrintf("Compact block index: failed opening reindex id tail: %s\n",
+                      error);
+            return false;
+        }
+        m_compact_block_ids = std::move(ids);
+        LogPrintf("Compact block index: initialized zero-base persistent ids for reindex\n");
+    }
+
     if (!m_compact_block_ids || !m_compact_block_ids->IsOpen()) {
         return true;
     }
