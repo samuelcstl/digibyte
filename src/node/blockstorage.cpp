@@ -355,6 +355,11 @@ fs::path BlockManager::CompactBlockIndexIdsPath() const
     return m_opts.blocks_dir / "index.compact.ids";
 }
 
+fs::path BlockManager::CompactBlockIndexDeltaPath() const
+{
+    return m_opts.blocks_dir / "index.compact.delta";
+}
+
 bool BlockManager::OpenCompactBlockIndexMapped()
 {
     AssertLockHeld(cs_main);
@@ -880,6 +885,214 @@ bool BlockManager::PersistCompactIds(
              hashes.size(),
              m_compact_block_ids->NextId(),
              m_compact_block_ids->SizeBytes());
+    return true;
+}
+
+bool BlockManager::BuildCompactBlockIndexDelta(
+    const std::vector<CBlockIndex*>& sorted)
+{
+    AssertLockHeld(cs_main);
+
+    uint64_t base_generation{0};
+    uint64_t base_entry_count{0};
+
+    const fs::path compact_path{CompactBlockIndexShadowPath()};
+    if (fs::exists(compact_path)) {
+        if (!OpenCompactBlockIndexMapped()) {
+            LogPrintf("Compact block index: cannot build metadata delta because compact base is unusable\n");
+            return false;
+        }
+        base_generation = m_compact_block_index->Header()->generation;
+        base_entry_count = m_compact_block_index->EntryCount();
+    }
+
+    if (m_next_compact_id < base_entry_count) {
+        LogPrintf("Compact block index: metadata delta id namespace precedes base next=%u base=%u\n",
+                  m_next_compact_id, base_entry_count);
+        return false;
+    }
+
+    const uint64_t tail_count{m_next_compact_id - base_entry_count};
+    if (tail_count != sorted.size() - base_entry_count) {
+        LogPrintf("Compact block index: metadata delta tail cardinality mismatch tail=%u live_minus_base=%u\n",
+                  tail_count, sorted.size() - base_entry_count);
+        return false;
+    }
+
+    std::vector<const CBlockIndex*> by_tail_id(tail_count, nullptr);
+    for (CBlockIndex* index : sorted) {
+        const BlockIndexId id{index->m_compact_id};
+        if (id == INVALID_BLOCK_INDEX_ID) {
+            LogPrintf("Compact block index: metadata delta encountered unassigned id hash=%s\n",
+                      index->GetBlockHash().ToString());
+            return false;
+        }
+        if (id < base_entry_count) continue;
+
+        const uint64_t offset{static_cast<uint64_t>(id) - base_entry_count};
+        if (offset >= by_tail_id.size() || by_tail_id[offset] != nullptr) {
+            LogPrintf("Compact block index: metadata delta duplicate/out-of-range id=%u\n", id);
+            return false;
+        }
+        by_tail_id[offset] = index;
+    }
+
+    std::vector<CompactBlockIndexEntry> entries;
+    entries.reserve(tail_count);
+    for (uint64_t offset = 0; offset < tail_count; ++offset) {
+        if (m_interrupt) {
+            LogPrintf("Compact block index: metadata delta build interrupted\n");
+            return false;
+        }
+
+        const CBlockIndex* index{by_tail_id[offset]};
+        if (!index) {
+            LogPrintf("Compact block index: metadata delta missing tail id=%u\n",
+                      base_entry_count + offset);
+            return false;
+        }
+
+        const BlockIndexId parent_id{
+            index->pprev ? index->pprev->m_compact_id : INVALID_BLOCK_INDEX_ID};
+        const BlockIndexId skip_id{
+            index->pskip ? index->pskip->m_compact_id : INVALID_BLOCK_INDEX_ID};
+
+        if ((index->pprev && parent_id == INVALID_BLOCK_INDEX_ID) ||
+            (index->pskip && skip_id == INVALID_BLOCK_INDEX_ID)) {
+            LogPrintf("Compact block index: metadata delta unresolved linkage id=%u\n",
+                      index->m_compact_id);
+            return false;
+        }
+
+        CompactBlockIndexEntry entry;
+        entry.hash = index->GetBlockHash();
+        entry.record = CompactBlockIndexRecord::FromBlockIndex(
+            *index, parent_id, skip_id);
+        entries.push_back(entry);
+    }
+
+    const fs::path path{CompactBlockIndexDeltaPath()};
+    const auto start{SteadyClock::now()};
+    std::string error;
+    if (!CompactBlockIndexDelta::Build(
+            path,
+            base_generation,
+            base_entry_count,
+            GetConsensus().hashGenesisBlock,
+            entries,
+            error)) {
+        LogPrintf("Compact block index: metadata delta build failed for %s: %s\n",
+                  fs::PathToString(path), error);
+        return false;
+    }
+
+    auto delta = std::make_unique<CompactBlockIndexDelta>();
+    if (!delta->Open(
+            path,
+            base_generation,
+            base_entry_count,
+            GetConsensus().hashGenesisBlock,
+            error)) {
+        LogPrintf("Compact block index: built metadata delta but could not reopen %s: %s\n",
+                  fs::PathToString(path), error);
+        return false;
+    }
+
+    LogPrintf("Compact block index: built metadata delta base=%u tail=%u bytes=%u path=%s in %d ms\n",
+              base_entry_count,
+              delta->TailEntryCount(),
+              delta->SizeBytes(),
+              fs::PathToString(path),
+              Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
+
+    m_compact_block_delta = std::move(delta);
+    return true;
+}
+
+bool BlockManager::VerifyCompactBlockIndexDelta()
+{
+    AssertLockHeld(cs_main);
+
+    uint64_t base_generation{0};
+    uint64_t base_entry_count{0};
+    const fs::path compact_path{CompactBlockIndexShadowPath()};
+    if (fs::exists(compact_path)) {
+        if (!OpenCompactBlockIndexMapped()) {
+            LogPrintf("Compact block index: cannot verify metadata delta because compact base is unusable\n");
+            return false;
+        }
+        base_generation = m_compact_block_index->Header()->generation;
+        base_entry_count = m_compact_block_index->EntryCount();
+    }
+
+    if (!m_compact_block_delta || !m_compact_block_delta->IsOpen()) {
+        auto delta = std::make_unique<CompactBlockIndexDelta>();
+        std::string error;
+        const fs::path path{CompactBlockIndexDeltaPath()};
+        if (!delta->Open(
+                path,
+                base_generation,
+                base_entry_count,
+                GetConsensus().hashGenesisBlock,
+                error)) {
+            LogPrintf("Compact block index: cannot open metadata delta %s: %s\n",
+                      fs::PathToString(path), error);
+            return false;
+        }
+        m_compact_block_delta = std::move(delta);
+    }
+
+    if (m_compact_block_delta->BaseEntryCount() != base_entry_count) {
+        LogPrintf("Compact block index: metadata delta base count mismatch\n");
+        return false;
+    }
+
+    const uint64_t tail_count{m_compact_block_delta->TailEntryCount()};
+    if (base_entry_count + tail_count != m_next_compact_id) {
+        LogPrintf("Compact block index: metadata delta namespace mismatch base=%u tail=%u next=%u\n",
+                  base_entry_count, tail_count, m_next_compact_id);
+        return false;
+    }
+
+    const auto start{SteadyClock::now()};
+    for (uint64_t offset = 0; offset < tail_count; ++offset) {
+        if (m_interrupt) {
+            LogPrintf("Compact block index: metadata delta verification interrupted\n");
+            return false;
+        }
+
+        const BlockIndexId id{
+            static_cast<BlockIndexId>(base_entry_count + offset)};
+        const CompactBlockIndexEntry* entry{m_compact_block_delta->Get(id)};
+        if (!entry) {
+            LogPrintf("Compact block index: metadata delta missing id=%u\n", id);
+            return false;
+        }
+
+        CBlockIndex* index{LookupBlockIndex(entry->hash)};
+        if (!index || index->m_compact_id != id) {
+            LogPrintf("Compact block index: metadata delta identity mismatch id=%u hash=%s\n",
+                      id, entry->hash.ToString());
+            return false;
+        }
+
+        const BlockIndexId parent_id{
+            index->pprev ? index->pprev->m_compact_id : INVALID_BLOCK_INDEX_ID};
+        const BlockIndexId skip_id{
+            index->pskip ? index->pskip->m_compact_id : INVALID_BLOCK_INDEX_ID};
+
+        if (!entry->record.MatchesBlockIndex(*index, parent_id, skip_id)) {
+            LogPrintf("Compact block index: metadata delta record mismatch id=%u height=%d hash=%s\n",
+                      id, index->nHeight, index->GetBlockHash().ToString());
+            return false;
+        }
+    }
+
+    LogPrintf("Compact block index: verified metadata delta base=%u tail=%u bytes=%u in %d ms\n",
+              base_entry_count,
+              tail_count,
+              m_compact_block_delta->SizeBytes(),
+              Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
     return true;
 }
 
