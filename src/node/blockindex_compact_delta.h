@@ -78,6 +78,17 @@ public:
         const uint256& genesis_hash,
         std::string& error);
 
+    static bool MigrateLegacyPair(
+        const fs::path& state_path,
+        const fs::path& legacy_delta_path,
+        const fs::path& legacy_log_path,
+        const fs::path& delta_slot_base_path,
+        const fs::path& log_slot_base_path,
+        uint64_t expected_base_generation,
+        uint64_t expected_base_entry_count,
+        const uint256& expected_genesis_hash,
+        std::string& error);
+
     bool Open(
         const fs::path& path,
         uint64_t expected_base_generation,

@@ -377,7 +377,10 @@ private:
     fs::path CompactBlockIndexIdsPath() const;
     fs::path CompactBlockIndexDeltaPath() const;
     fs::path CompactBlockIndexDeltaLogPath() const;
+    fs::path CompactBlockIndexDeltaStatePath() const;
     fs::path CompactBlockIndexDeltaPendingPath() const;
+    bool OpenCompactBlockIndexDeltaState(bool migrate_legacy)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void AssignCompactIdsDeterministic(const std::vector<CBlockIndex*>& sorted)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool OpenCompactBlockIndexMapped()
@@ -534,6 +537,7 @@ public:
     std::unique_ptr<CompactBlockIndexIds> m_compact_block_ids GUARDED_BY(cs_main);
     std::unique_ptr<CompactBlockIndexDelta> m_compact_block_delta GUARDED_BY(cs_main);
     std::unique_ptr<CompactBlockIndexDeltaLog> m_compact_block_delta_log GUARDED_BY(cs_main);
+    std::unique_ptr<CompactBlockIndexDeltaState> m_compact_block_delta_state GUARDED_BY(cs_main);
 
     // Next process-local compact id. Startup restores/assigns the historical
     // namespace, while clean IBD/reindex naturally starts at zero.

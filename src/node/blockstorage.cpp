@@ -366,6 +366,11 @@ fs::path BlockManager::CompactBlockIndexDeltaLogPath() const
     return m_opts.blocks_dir / "index.compact.delta.log";
 }
 
+fs::path BlockManager::CompactBlockIndexDeltaStatePath() const
+{
+    return m_opts.blocks_dir / "index.compact.delta.state";
+}
+
 fs::path BlockManager::CompactBlockIndexDeltaPendingPath() const
 {
     return m_opts.blocks_dir / "index.compact.delta.pending";
@@ -899,6 +904,82 @@ bool BlockManager::PersistCompactIds(
     return true;
 }
 
+bool BlockManager::OpenCompactBlockIndexDeltaState(bool migrate_legacy)
+{
+    AssertLockHeld(cs_main);
+
+    if (m_compact_block_delta_state && m_compact_block_delta_state->IsOpen()) {
+        return true;
+    }
+
+    uint64_t base_generation{0};
+    uint64_t base_entry_count{0};
+    const fs::path compact_path{CompactBlockIndexShadowPath()};
+    if (fs::exists(compact_path)) {
+        if (!OpenCompactBlockIndexMapped()) {
+            LogPrintf("Compact block index: cannot open metadata selector because compact base is unusable\n");
+            return false;
+        }
+        base_generation = m_compact_block_index->Header()->generation;
+        base_entry_count = m_compact_block_index->EntryCount();
+    }
+
+    const fs::path state_path{CompactBlockIndexDeltaStatePath()};
+    std::string error;
+
+    if (!fs::exists(state_path)) {
+        if (!migrate_legacy) {
+            LogPrintf("Compact block index: metadata selector is missing\n");
+            return false;
+        }
+
+        const fs::path legacy_delta{CompactBlockIndexDeltaPath()};
+        const fs::path legacy_log{CompactBlockIndexDeltaLogPath()};
+        if (!fs::exists(legacy_delta) || !fs::exists(legacy_log)) {
+            LogPrintf("Compact block index: cannot migrate metadata selector because legacy pair is incomplete\n");
+            return false;
+        }
+
+        if (!CompactBlockIndexDeltaState::MigrateLegacyPair(
+                state_path,
+                legacy_delta,
+                legacy_log,
+                CompactBlockIndexDeltaPath(),
+                CompactBlockIndexDeltaLogPath(),
+                base_generation,
+                base_entry_count,
+                GetConsensus().hashGenesisBlock,
+                error)) {
+            LogPrintf("Compact block index: metadata pair migration failed: %s\n", error);
+            return false;
+        }
+
+        LogPrintf("Compact block index: migrated legacy metadata pair into slot A selector=%s\n",
+                  fs::PathToString(state_path));
+    }
+
+    auto state = std::make_unique<CompactBlockIndexDeltaState>();
+    if (!state->Open(
+            state_path,
+            base_generation,
+            base_entry_count,
+            GetConsensus().hashGenesisBlock,
+            error)) {
+        LogPrintf("Compact block index: cannot open metadata selector %s: %s\n",
+                  fs::PathToString(state_path), error);
+        return false;
+    }
+
+    LogPrintf("Compact block index: opened metadata selector slot=%s sequence=%u tail=%u path=%s\n",
+              state->ActiveSlot() == CompactBlockIndexDeltaSlot::A ? "A" : "B",
+              state->Sequence(),
+              state->SnapshotTailEntryCount(),
+              fs::PathToString(state_path));
+
+    m_compact_block_delta_state = std::move(state);
+    return true;
+}
+
 bool BlockManager::OpenCompactBlockIndexDeltaLog(bool create)
 {
     AssertLockHeld(cs_main);
@@ -907,20 +988,17 @@ bool BlockManager::OpenCompactBlockIndexDeltaLog(bool create)
         LogPrintf("Compact block index: cannot open metadata delta log without delta snapshot\n");
         return false;
     }
-
-    uint64_t base_generation{0};
-    const fs::path compact_path{CompactBlockIndexShadowPath()};
-    if (fs::exists(compact_path)) {
-        if (!OpenCompactBlockIndexMapped()) {
-            LogPrintf("Compact block index: cannot bind metadata delta log because compact base is unusable\n");
-            return false;
-        }
-        base_generation = m_compact_block_index->Header()->generation;
+    if (!OpenCompactBlockIndexDeltaState(/*migrate_legacy=*/!create)) {
+        return false;
     }
 
+    const uint64_t base_generation{m_compact_block_delta->BaseGeneration()};
     const uint64_t base_entry_count{m_compact_block_delta->BaseEntryCount()};
     const uint64_t snapshot_tail_entry_count{m_compact_block_delta->TailEntryCount()};
-    const fs::path path{CompactBlockIndexDeltaLogPath()};
+    const fs::path path{
+        CompactBlockIndexDeltaState::SlotPath(
+            CompactBlockIndexDeltaLogPath(),
+            m_compact_block_delta_state->ActiveSlot())};
     std::string error;
 
     if (create) {
@@ -950,7 +1028,8 @@ bool BlockManager::OpenCompactBlockIndexDeltaLog(bool create)
         return false;
     }
 
-    LogPrintf("Compact block index: opened metadata delta log records=%u bytes=%u path=%s\n",
+    LogPrintf("Compact block index: opened metadata delta log slot=%s records=%u bytes=%u path=%s\n",
+              m_compact_block_delta_state->ActiveSlot() == CompactBlockIndexDeltaSlot::A ? "A" : "B",
               log->RecordCount(),
               log->SizeBytes(),
               fs::PathToString(path));
@@ -1032,7 +1111,11 @@ void BlockManager::InvalidateCompactBlockIndexDeltaOverlay()
     m_compact_block_delta_log.reset();
     m_compact_block_delta.reset();
 
-    const fs::path path{CompactBlockIndexDeltaLogPath()};
+    fs::path path{CompactBlockIndexDeltaLogPath()};
+    if (m_compact_block_delta_state && m_compact_block_delta_state->IsOpen()) {
+        path = CompactBlockIndexDeltaState::SlotPath(
+            path, m_compact_block_delta_state->ActiveSlot());
+    }
     try {
         if (fs::exists(path)) {
             fs::remove(path);
@@ -1321,48 +1404,123 @@ bool BlockManager::BuildCompactBlockIndexDelta(
         entries.push_back(entry);
     }
 
-    const fs::path path{CompactBlockIndexDeltaPath()};
     const auto start{SteadyClock::now()};
     std::string error;
+
+    CompactBlockIndexDeltaSlot target_slot{CompactBlockIndexDeltaSlot::A};
+    uint64_t sequence{1};
+    const fs::path state_path{CompactBlockIndexDeltaStatePath()};
+    if (fs::exists(state_path)) {
+        auto current_state = std::make_unique<CompactBlockIndexDeltaState>();
+        if (!current_state->Open(
+                state_path,
+                base_generation,
+                base_entry_count,
+                GetConsensus().hashGenesisBlock,
+                error)) {
+            LogPrintf("Compact block index: cannot open current metadata selector before rebuild: %s\n",
+                      error);
+            return false;
+        }
+        target_slot = CompactBlockIndexDeltaState::OtherSlot(
+            current_state->ActiveSlot());
+        sequence = current_state->Sequence() + 1;
+    }
+
+    const fs::path delta_path{
+        CompactBlockIndexDeltaState::SlotPath(
+            CompactBlockIndexDeltaPath(), target_slot)};
+    const fs::path log_path{
+        CompactBlockIndexDeltaState::SlotPath(
+            CompactBlockIndexDeltaLogPath(), target_slot)};
+
     if (!CompactBlockIndexDelta::Build(
-            path,
+            delta_path,
             base_generation,
             base_entry_count,
             GetConsensus().hashGenesisBlock,
             entries,
             error)) {
         LogPrintf("Compact block index: metadata delta build failed for %s: %s\n",
-                  fs::PathToString(path), error);
+                  fs::PathToString(delta_path), error);
+        return false;
+    }
+
+    if (!CompactBlockIndexDeltaLog::Create(
+            log_path,
+            base_generation,
+            base_entry_count,
+            entries.size(),
+            GetConsensus().hashGenesisBlock,
+            error)) {
+        LogPrintf("Compact block index: metadata delta log build failed for %s: %s\n",
+                  fs::PathToString(log_path), error);
         return false;
     }
 
     auto delta = std::make_unique<CompactBlockIndexDelta>();
+    auto log = std::make_unique<CompactBlockIndexDeltaLog>();
     if (!delta->Open(
-            path,
+            delta_path,
+            base_generation,
+            base_entry_count,
+            GetConsensus().hashGenesisBlock,
+            error) ||
+        !log->Open(
+            log_path,
+            base_generation,
+            base_entry_count,
+            entries.size(),
+            GetConsensus().hashGenesisBlock,
+            error)) {
+        LogPrintf("Compact block index: built metadata pair but could not reopen it: %s\n",
+                  error);
+        return false;
+    }
+
+    if (!CompactBlockIndexDeltaState::Publish(
+            state_path,
+            target_slot,
+            sequence,
+            base_generation,
+            base_entry_count,
+            entries.size(),
+            GetConsensus().hashGenesisBlock,
+            error)) {
+        LogPrintf("Compact block index: failed publishing metadata selector: %s\n",
+                  error);
+        return false;
+    }
+
+    auto state = std::make_unique<CompactBlockIndexDeltaState>();
+    if (!state->Open(
+            state_path,
             base_generation,
             base_entry_count,
             GetConsensus().hashGenesisBlock,
             error)) {
-        LogPrintf("Compact block index: built metadata delta but could not reopen %s: %s\n",
-                  fs::PathToString(path), error);
+        LogPrintf("Compact block index: published metadata selector but could not reopen it: %s\n",
+                  error);
         return false;
     }
 
-    LogPrintf("Compact block index: built metadata delta base=%u tail=%u bytes=%u path=%s in %d ms\n",
+    LogPrintf("Compact block index: built metadata pair slot=%s sequence=%u base=%u tail=%u delta_bytes=%u log_bytes=%u in %d ms\n",
+              target_slot == CompactBlockIndexDeltaSlot::A ? "A" : "B",
+              sequence,
               base_entry_count,
               delta->TailEntryCount(),
               delta->SizeBytes(),
-              fs::PathToString(path),
+              log->SizeBytes(),
               Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
 
+    m_compact_block_delta_state = std::move(state);
     m_compact_block_delta = std::move(delta);
-    if (!OpenCompactBlockIndexDeltaLog(/*create=*/true)) {
-        m_compact_block_delta.reset();
-        return false;
-    }
+    m_compact_block_delta_log = std::move(log);
+
     if (!ClearCompactBlockIndexDeltaPending()) {
         m_compact_block_delta_log.reset();
         m_compact_block_delta.reset();
+        m_compact_block_delta_state.reset();
         return false;
     }
     return true;
@@ -1384,10 +1542,17 @@ bool BlockManager::VerifyCompactBlockIndexDelta()
         base_entry_count = m_compact_block_index->EntryCount();
     }
 
+    if (!OpenCompactBlockIndexDeltaState(/*migrate_legacy=*/true)) {
+        return false;
+    }
+
     if (!m_compact_block_delta || !m_compact_block_delta->IsOpen()) {
         auto delta = std::make_unique<CompactBlockIndexDelta>();
         std::string error;
-        const fs::path path{CompactBlockIndexDeltaPath()};
+        const fs::path path{
+            CompactBlockIndexDeltaState::SlotPath(
+                CompactBlockIndexDeltaPath(),
+                m_compact_block_delta_state->ActiveSlot())};
         if (!delta->Open(
                 path,
                 base_generation,
@@ -1398,6 +1563,15 @@ bool BlockManager::VerifyCompactBlockIndexDelta()
                       fs::PathToString(path), error);
             return false;
         }
+
+        if (delta->TailEntryCount() !=
+            m_compact_block_delta_state->SnapshotTailEntryCount()) {
+            LogPrintf("Compact block index: metadata selector tail mismatch selector=%u delta=%u\n",
+                      m_compact_block_delta_state->SnapshotTailEntryCount(),
+                      delta->TailEntryCount());
+            return false;
+        }
+
         m_compact_block_delta = std::move(delta);
     }
 
@@ -2272,12 +2446,16 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
             !VerifyCompactBlockIndexDelta()) {
             LogPrintf("Compact block index: metadata delta build/verify failed; continuing without metadata delta\n");
             m_compact_block_delta.reset();
+            m_compact_block_delta_log.reset();
+            m_compact_block_delta_state.reset();
         }
         break;
     case kernel::BlockIndexCompactDeltaMode::VERIFY:
         if (!VerifyCompactBlockIndexDelta()) {
             LogPrintf("Compact block index: metadata delta verification failed; continuing without metadata delta\n");
             m_compact_block_delta.reset();
+            m_compact_block_delta_log.reset();
+            m_compact_block_delta_state.reset();
         }
         break;
     }

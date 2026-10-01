@@ -470,8 +470,16 @@ base binding and checkpoint tail count. It deliberately does not pin the live
 log record count, because normal operation continues appending to the selected
 log.
 
-The next storage-lifecycle gate is wiring compaction through this selector and
-migrating the existing unslotted checkpoint/log pair, followed by
+The selector is now wired into the runtime metadata lifecycle. Existing
+unslotted checkpoint/log files are migrated once by rebuilding and fsyncing an
+equivalent slot-A pair, validating it, and only then publishing the selector.
+The original unslotted files remain untouched during migration, so an
+interruption before selector publication simply retries from the legacy pair.
+Fresh build mode also writes a complete inactive slot and flips the selector
+only after both files reopen successfully.
+
+The next storage-lifecycle gate is wiring the compaction planner into inactive
+slot publication and fault-injecting the selector boundary, followed by
 lookup-tail maintenance and generation rollover. After those are proven, the
 next major phase is converting long-lived pointer owners to ids/leases so cold
 historical `CBlockIndex` objects can stop existing permanently in anonymous

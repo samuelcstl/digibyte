@@ -86,6 +86,138 @@ bool CompactBlockIndexDeltaState::Publish(
     }
 }
 
+bool CompactBlockIndexDeltaState::MigrateLegacyPair(
+    const fs::path& state_path,
+    const fs::path& legacy_delta_path,
+    const fs::path& legacy_log_path,
+    const fs::path& delta_slot_base_path,
+    const fs::path& log_slot_base_path,
+    uint64_t expected_base_generation,
+    uint64_t expected_base_entry_count,
+    const uint256& expected_genesis_hash,
+    std::string& error)
+{
+    if (fs::exists(state_path)) {
+        error = "compact metadata delta selector already exists";
+        return false;
+    }
+
+    CompactBlockIndexDelta legacy_delta;
+    if (!legacy_delta.Open(
+            legacy_delta_path,
+            expected_base_generation,
+            expected_base_entry_count,
+            expected_genesis_hash,
+            error)) {
+        return false;
+    }
+
+    CompactBlockIndexDeltaLog legacy_log;
+    if (!legacy_log.Open(
+            legacy_log_path,
+            expected_base_generation,
+            expected_base_entry_count,
+            legacy_delta.TailEntryCount(),
+            expected_genesis_hash,
+            error)) {
+        return false;
+    }
+
+    std::vector<CompactBlockIndexEntry> entries;
+    entries.reserve(static_cast<size_t>(legacy_delta.TailEntryCount()));
+    for (uint64_t offset = 0; offset < legacy_delta.TailEntryCount(); ++offset) {
+        const BlockIndexId id{
+            static_cast<BlockIndexId>(expected_base_entry_count + offset)};
+        const CompactBlockIndexEntry* entry{legacy_delta.Get(id)};
+        if (!entry) {
+            error = "compact metadata legacy migration missing checkpoint entry";
+            return false;
+        }
+        entries.push_back(*entry);
+    }
+
+    std::vector<CompactBlockIndexDeltaLogRecord> updates;
+    updates.reserve(static_cast<size_t>(legacy_log.RecordCount()));
+    if (!legacy_log.ForEach(
+            [&](const CompactBlockIndexDeltaLogRecord& update) {
+                updates.push_back(update);
+                return true;
+            },
+            error)) {
+        return false;
+    }
+
+    const auto slot{CompactBlockIndexDeltaSlot::A};
+    const fs::path delta_path{SlotPath(delta_slot_base_path, slot)};
+    const fs::path log_path{SlotPath(log_slot_base_path, slot)};
+
+    if (!CompactBlockIndexDelta::Build(
+            delta_path,
+            expected_base_generation,
+            expected_base_entry_count,
+            expected_genesis_hash,
+            entries,
+            error)) {
+        return false;
+    }
+
+    if (!CompactBlockIndexDeltaLog::Create(
+            log_path,
+            expected_base_generation,
+            expected_base_entry_count,
+            entries.size(),
+            expected_genesis_hash,
+            error)) {
+        return false;
+    }
+
+    CompactBlockIndexDeltaLog migrated_log;
+    if (!migrated_log.Open(
+            log_path,
+            expected_base_generation,
+            expected_base_entry_count,
+            entries.size(),
+            expected_genesis_hash,
+            error) ||
+        !migrated_log.Append(updates, error)) {
+        return false;
+    }
+
+    CompactBlockIndexDelta migrated_delta;
+    CompactBlockIndexDeltaLog verified_log;
+    if (!migrated_delta.Open(
+            delta_path,
+            expected_base_generation,
+            expected_base_entry_count,
+            expected_genesis_hash,
+            error) ||
+        !verified_log.Open(
+            log_path,
+            expected_base_generation,
+            expected_base_entry_count,
+            entries.size(),
+            expected_genesis_hash,
+            error)) {
+        return false;
+    }
+
+    if (migrated_delta.TailEntryCount() != legacy_delta.TailEntryCount() ||
+        verified_log.RecordCount() != legacy_log.RecordCount()) {
+        error = "compact metadata legacy migration verification mismatch";
+        return false;
+    }
+
+    return Publish(
+        state_path,
+        slot,
+        /*sequence=*/1,
+        expected_base_generation,
+        expected_base_entry_count,
+        entries.size(),
+        expected_genesis_hash,
+        error);
+}
+
 bool CompactBlockIndexDeltaState::Open(
     const fs::path& path,
     uint64_t expected_base_generation,
