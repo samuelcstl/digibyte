@@ -189,10 +189,11 @@ bool CompactBlockIndexDelta::PlanCompaction(
     std::unordered_map<BlockIndexId, CompactBlockIndexDeltaLogRecord> latest;
     latest.reserve(static_cast<size_t>(log.RecordCount()));
 
+    bool invalid_log_id{false};
     if (!log.ForEach(
             [&](const CompactBlockIndexDeltaLogRecord& record) {
                 if (static_cast<uint64_t>(record.id) >= expected_next_id) {
-                    error = "compact metadata compaction log references unpublished id";
+                    invalid_log_id = true;
                     return false;
                 }
                 latest[record.id] = record;
@@ -202,6 +203,10 @@ bool CompactBlockIndexDelta::PlanCompaction(
         if (error.empty()) {
             error = "compact metadata compaction log replay failed";
         }
+        return false;
+    }
+    if (invalid_log_id) {
+        error = "compact metadata compaction log references unpublished id";
         return false;
     }
 
