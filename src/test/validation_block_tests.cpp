@@ -301,6 +301,105 @@ BOOST_AUTO_TEST_CASE(compact_block_index_metadata_pending_batch)
     BOOST_CHECK(published[1].entry.hash == uint256S("bbbb"));
 }
 
+BOOST_AUTO_TEST_CASE(compact_block_index_metadata_delta_pair_selector)
+{
+    const fs::path delta_base{m_path_root / "compact-index-delta-pair"};
+    const fs::path log_base{m_path_root / "compact-index-delta-pair.log"};
+    const fs::path state_path{m_path_root / "compact-index-delta-pair.state"};
+    const uint256 genesis{Params().GetConsensus().hashGenesisBlock};
+    std::string error;
+
+    const auto slot_a{node::CompactBlockIndexDeltaSlot::A};
+    const auto slot_b{node::CompactBlockIndexDeltaSlot::B};
+
+    const fs::path delta_a{
+        node::CompactBlockIndexDeltaState::SlotPath(delta_base, slot_a)};
+    const fs::path log_a{
+        node::CompactBlockIndexDeltaState::SlotPath(log_base, slot_a)};
+    const fs::path delta_b{
+        node::CompactBlockIndexDeltaState::SlotPath(delta_base, slot_b)};
+    const fs::path log_b{
+        node::CompactBlockIndexDeltaState::SlotPath(log_base, slot_b)};
+
+    std::vector<node::CompactBlockIndexEntry> entries_a(2);
+    entries_a[0].hash = uint256S("10");
+    entries_a[1].hash = uint256S("11");
+
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexDelta::Build(
+            delta_a, 7, 10, genesis, entries_a, error),
+        error);
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexDeltaLog::Create(
+            log_a, 7, 10, 2, genesis, error),
+        error);
+
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexDeltaState::Publish(
+            state_path, slot_a, /*sequence=*/1, 7, 10, 2, genesis, error),
+        error);
+
+    node::CompactBlockIndexDeltaState state;
+    BOOST_REQUIRE_MESSAGE(state.Open(state_path, 7, 10, genesis, error), error);
+    BOOST_CHECK(state.IsOpen());
+    BOOST_CHECK(state.ActiveSlot() == slot_a);
+    BOOST_CHECK_EQUAL(state.Sequence(), 1U);
+    BOOST_CHECK_EQUAL(state.SnapshotTailEntryCount(), 2U);
+    BOOST_CHECK(
+        node::CompactBlockIndexDeltaState::OtherSlot(state.ActiveSlot()) == slot_b);
+
+    node::CompactBlockIndexDelta opened_a;
+    node::CompactBlockIndexDeltaLog opened_log_a;
+    BOOST_REQUIRE_MESSAGE(opened_a.Open(delta_a, 7, 10, genesis, error), error);
+    BOOST_REQUIRE_MESSAGE(opened_log_a.Open(log_a, 7, 10, 2, genesis, error), error);
+
+    // Prepare a complete inactive B pair before publishing the selector.
+    std::vector<node::CompactBlockIndexEntry> entries_b(3);
+    entries_b[0].hash = uint256S("10");
+    entries_b[1].hash = uint256S("11");
+    entries_b[2].hash = uint256S("12");
+
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexDelta::Build(
+            delta_b, 7, 10, genesis, entries_b, error),
+        error);
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexDeltaLog::Create(
+            log_b, 7, 10, 3, genesis, error),
+        error);
+
+    // Until this atomic state-file replacement, A remains authoritative.
+    BOOST_REQUIRE_MESSAGE(state.Open(state_path, 7, 10, genesis, error), error);
+    BOOST_CHECK(state.ActiveSlot() == slot_a);
+    BOOST_CHECK_EQUAL(state.Sequence(), 1U);
+
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexDeltaState::Publish(
+            state_path, slot_b, /*sequence=*/2, 7, 10, 3, genesis, error),
+        error);
+
+    BOOST_REQUIRE_MESSAGE(state.Open(state_path, 7, 10, genesis, error), error);
+    BOOST_CHECK(state.ActiveSlot() == slot_b);
+    BOOST_CHECK_EQUAL(state.Sequence(), 2U);
+    BOOST_CHECK_EQUAL(state.SnapshotTailEntryCount(), 3U);
+
+    node::CompactBlockIndexDelta opened_b;
+    node::CompactBlockIndexDeltaLog opened_log_b;
+    BOOST_REQUIRE_MESSAGE(opened_b.Open(delta_b, 7, 10, genesis, error), error);
+    BOOST_REQUIRE_MESSAGE(opened_log_b.Open(log_b, 7, 10, 3, genesis, error), error);
+
+    // The previous A pair remains intact, making an interrupted next
+    // compaction harmless until a later selector publication chooses it again.
+    BOOST_CHECK_EQUAL(opened_a.TailEntryCount(), 2U);
+    BOOST_CHECK_EQUAL(opened_log_a.RecordCount(), 0U);
+    BOOST_CHECK_EQUAL(opened_b.TailEntryCount(), 3U);
+    BOOST_CHECK_EQUAL(opened_log_b.RecordCount(), 0U);
+
+    BOOST_CHECK(
+        node::CompactBlockIndexDeltaState::SlotPath(delta_base, slot_a) !=
+        node::CompactBlockIndexDeltaState::SlotPath(delta_base, slot_b));
+}
+
 BOOST_AUTO_TEST_CASE(compact_block_index_metadata_delta_compaction_plan)
 {
     const fs::path delta_path{m_path_root / "compact-index-delta-compact.dat"};

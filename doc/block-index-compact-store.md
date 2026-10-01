@@ -456,14 +456,26 @@ Still required:
 - no full-history scan/rewrite for ordinary tip growth.
 
 The implemented base + checkpoint + sparse-overlay model remains the intended
-architecture. Crash recovery is now proven. The compaction planner now defines
-the fold precisely: all tail state becomes a new complete delta checkpoint,
-while last-write-wins updates to immutable-base ids remain as a deduplicated
-sparse overlay. The next storage-lifecycle gate is crash-safe publication of
-that checkpoint/log pair, followed by lookup-tail maintenance and generation
-rollover. After those are proven, the next major phase is converting long-lived
-pointer owners to ids/leases so cold historical `CBlockIndex` objects can stop
-existing permanently in anonymous memory.
+architecture. Crash recovery is now proven. The compaction planner defines the
+fold precisely: all tail state becomes a new complete delta checkpoint, while
+last-write-wins updates to immutable-base ids remain as a deduplicated sparse
+overlay.
+
+Crash-safe pair publication uses two checkpoint/log slots plus a 128-byte
+selector. A compaction writes and fsyncs the complete inactive pair first, then
+atomically replaces the selector to choose that slot. A crash before selector
+publication leaves the previous pair authoritative; a crash afterward selects
+a fully durable new pair. The selector records only the active slot, sequence,
+base binding and checkpoint tail count. It deliberately does not pin the live
+log record count, because normal operation continues appending to the selected
+log.
+
+The next storage-lifecycle gate is wiring compaction through this selector and
+migrating the existing unslotted checkpoint/log pair, followed by
+lookup-tail maintenance and generation rollover. After those are proven, the
+next major phase is converting long-lived pointer owners to ids/leases so cold
+historical `CBlockIndex` objects can stop existing permanently in anonymous
+memory.
 
 ## Pointer-owner conversion and hot leases
 

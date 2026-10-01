@@ -41,6 +41,82 @@ struct CompactBlockIndexDeltaHeader
 
 static_assert(sizeof(CompactBlockIndexDeltaHeader) == 128);
 
+static constexpr uint32_t COMPACT_BLOCK_INDEX_DELTA_STATE_VERSION{1};
+static constexpr std::array<unsigned char, 8> COMPACT_BLOCK_INDEX_DELTA_STATE_MAGIC{
+    'D', 'G', 'B', 'C', 'D', 'S', '1', '\0'};
+
+enum class CompactBlockIndexDeltaSlot : uint32_t {
+    A = 0,
+    B = 1,
+};
+
+struct CompactBlockIndexDeltaStateHeader
+{
+    std::array<unsigned char, 8> magic{COMPACT_BLOCK_INDEX_DELTA_STATE_MAGIC};
+    uint32_t version{COMPACT_BLOCK_INDEX_DELTA_STATE_VERSION};
+    uint32_t active_slot{static_cast<uint32_t>(CompactBlockIndexDeltaSlot::A)};
+    uint64_t sequence{0};
+    uint64_t base_generation{0};
+    uint64_t base_entry_count{0};
+    uint64_t snapshot_tail_entry_count{0};
+    uint256 genesis_hash{};
+    uint64_t reserved[6]{};
+};
+
+static_assert(sizeof(CompactBlockIndexDeltaStateHeader) == 128);
+
+class CompactBlockIndexDeltaState
+{
+public:
+    static bool Publish(
+        const fs::path& path,
+        CompactBlockIndexDeltaSlot active_slot,
+        uint64_t sequence,
+        uint64_t base_generation,
+        uint64_t base_entry_count,
+        uint64_t snapshot_tail_entry_count,
+        const uint256& genesis_hash,
+        std::string& error);
+
+    bool Open(
+        const fs::path& path,
+        uint64_t expected_base_generation,
+        uint64_t expected_base_entry_count,
+        const uint256& expected_genesis_hash,
+        std::string& error);
+
+    [[nodiscard]] bool IsOpen() const noexcept { return m_open; }
+    [[nodiscard]] CompactBlockIndexDeltaSlot ActiveSlot() const noexcept
+    {
+        return static_cast<CompactBlockIndexDeltaSlot>(m_header.active_slot);
+    }
+    [[nodiscard]] uint64_t Sequence() const noexcept { return m_header.sequence; }
+    [[nodiscard]] uint64_t BaseGeneration() const noexcept { return m_header.base_generation; }
+    [[nodiscard]] uint64_t BaseEntryCount() const noexcept { return m_header.base_entry_count; }
+    [[nodiscard]] uint64_t SnapshotTailEntryCount() const noexcept
+    {
+        return m_header.snapshot_tail_entry_count;
+    }
+
+    static CompactBlockIndexDeltaSlot OtherSlot(CompactBlockIndexDeltaSlot slot) noexcept
+    {
+        return slot == CompactBlockIndexDeltaSlot::A
+            ? CompactBlockIndexDeltaSlot::B
+            : CompactBlockIndexDeltaSlot::A;
+    }
+
+    static fs::path SlotPath(const fs::path& base_path, CompactBlockIndexDeltaSlot slot)
+    {
+        fs::path path{base_path};
+        path += slot == CompactBlockIndexDeltaSlot::A ? ".a" : ".b";
+        return path;
+    }
+
+private:
+    CompactBlockIndexDeltaStateHeader m_header{};
+    bool m_open{false};
+};
+
 struct CompactBlockIndexDeltaCompaction
 {
     std::vector<CompactBlockIndexEntry> tail_entries;

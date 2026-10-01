@@ -23,6 +23,128 @@ CompactBlockIndexDelta::~CompactBlockIndexDelta()
     Close();
 }
 
+bool CompactBlockIndexDeltaState::Publish(
+    const fs::path& path,
+    CompactBlockIndexDeltaSlot active_slot,
+    uint64_t sequence,
+    uint64_t base_generation,
+    uint64_t base_entry_count,
+    uint64_t snapshot_tail_entry_count,
+    const uint256& genesis_hash,
+    std::string& error)
+{
+    const uint32_t slot_value{static_cast<uint32_t>(active_slot)};
+    if (slot_value > static_cast<uint32_t>(CompactBlockIndexDeltaSlot::B)) {
+        error = "compact metadata delta state has invalid active slot";
+        return false;
+    }
+    if (base_entry_count + snapshot_tail_entry_count >=
+        static_cast<uint64_t>(INVALID_BLOCK_INDEX_ID)) {
+        error = "compact metadata delta state exceeds 32-bit id space";
+        return false;
+    }
+
+    fs::path tmp{path};
+    tmp += ".tmp";
+
+    CompactBlockIndexDeltaStateHeader header;
+    header.active_slot = slot_value;
+    header.sequence = sequence;
+    header.base_generation = base_generation;
+    header.base_entry_count = base_entry_count;
+    header.snapshot_tail_entry_count = snapshot_tail_entry_count;
+    header.genesis_hash = genesis_hash;
+
+    try {
+        FILE* file{fsbridge::fopen(tmp, "wb")};
+        if (!file) {
+            error = "cannot create compact metadata delta state temp file";
+            return false;
+        }
+
+        const bool wrote{std::fwrite(&header, sizeof(header), 1, file) == 1};
+        const bool committed{wrote && FileCommit(file)};
+        const bool closed{std::fclose(file) == 0};
+        if (!wrote || !committed || !closed) {
+            fs::remove(tmp);
+            error = "failed to write compact metadata delta state";
+            return false;
+        }
+
+        if (!RenameOver(tmp, path)) {
+            fs::remove(tmp);
+            error = "failed to publish compact metadata delta state";
+            return false;
+        }
+
+        DirectoryCommit(path.parent_path());
+        return true;
+    } catch (const std::exception& e) {
+        fs::remove(tmp);
+        error = e.what();
+        return false;
+    }
+}
+
+bool CompactBlockIndexDeltaState::Open(
+    const fs::path& path,
+    uint64_t expected_base_generation,
+    uint64_t expected_base_entry_count,
+    const uint256& expected_genesis_hash,
+    std::string& error)
+{
+    m_open = false;
+    m_header = {};
+
+    try {
+        if (fs::file_size(path) != sizeof(CompactBlockIndexDeltaStateHeader)) {
+            error = "compact metadata delta state file-size mismatch";
+            return false;
+        }
+
+        FILE* file{fsbridge::fopen(path, "rb")};
+        if (!file) {
+            error = "cannot open compact metadata delta state";
+            return false;
+        }
+
+        CompactBlockIndexDeltaStateHeader header;
+        const bool read{std::fread(&header, sizeof(header), 1, file) == 1};
+        const bool closed{std::fclose(file) == 0};
+        if (!read || !closed) {
+            error = "failed to read compact metadata delta state";
+            return false;
+        }
+
+        if (header.magic != COMPACT_BLOCK_INDEX_DELTA_STATE_MAGIC ||
+            header.version != COMPACT_BLOCK_INDEX_DELTA_STATE_VERSION ||
+            header.active_slot > static_cast<uint32_t>(CompactBlockIndexDeltaSlot::B)) {
+            error = "compact metadata delta state format mismatch";
+            return false;
+        }
+
+        if (header.base_generation != expected_base_generation ||
+            header.base_entry_count != expected_base_entry_count ||
+            header.genesis_hash != expected_genesis_hash) {
+            error = "compact metadata delta state base-generation mismatch";
+            return false;
+        }
+
+        if (header.base_entry_count + header.snapshot_tail_entry_count >=
+            static_cast<uint64_t>(INVALID_BLOCK_INDEX_ID)) {
+            error = "compact metadata delta state exceeds 32-bit id space";
+            return false;
+        }
+
+        m_header = header;
+        m_open = true;
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+}
+
 bool CompactBlockIndexDelta::Build(
     const fs::path& path,
     uint64_t base_generation,
