@@ -889,6 +889,11 @@ public:
     // namespace, while clean IBD/reindex naturally starts at zero.
     uint64_t m_next_compact_id GUARDED_BY(cs_main){0};
 
+    // Height-ordered startup view built once during BlockManager loading and
+    // handed to ChainstateManager for candidate/header initialization. Keeping
+    // it briefly avoids a second full traversal of the 24M-entry legacy map.
+    std::vector<CBlockIndex*> m_startup_block_index_view GUARDED_BY(cs_main);
+
     /**
      * The height of the base block of an assumeutxo snapshot, if one is in use.
      *
@@ -905,6 +910,7 @@ public:
 
     std::vector<CBlockIndex*> GetAllBlockIndices() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     std::vector<CBlockIndex*> GetAllBlockIndicesByCompactId() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    std::vector<CBlockIndex*> TakeStartupBlockIndexView() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ActivateBlockIndexPayloadCache(CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**

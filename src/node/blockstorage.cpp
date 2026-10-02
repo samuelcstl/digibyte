@@ -116,43 +116,17 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
     std::unique_ptr<CDBIterator> pcursor(NewIterator());
     pcursor->Seek(std::make_pair(DB_BLOCK_INDEX, uint256()));
 
-    // Count total entries first for progress calculation
-    // This is a quick count-only pass
-    const auto count_start{SteadyClock::now()};
-    int nTotal = 0;
-    {
-        std::unique_ptr<CDBIterator> pcounter(NewIterator());
-        pcounter->Seek(std::make_pair(DB_BLOCK_INDEX, uint256()));
-        while (pcounter->Valid()) {
-            std::pair<uint8_t, uint256> key;
-            if (pcounter->GetKey(key) && key.first == DB_BLOCK_INDEX) {
-                nTotal++;
-                pcounter->Next();
-            } else {
-                break;
-            }
-        }
-    }
-    LogPrintf("Startup timing: block index count pass: %d entries in %d ms\n",
-              nTotal, Ticks<std::chrono::milliseconds>(SteadyClock::now() - count_start));
-
+    // Do not make a complete LevelDB pass merely to calculate a cosmetic
+    // percentage. At mainnet scale that duplicate traversal costs tens of
+    // seconds before we deserialize a single record.
     int nCount = 0;
     int nChainWorkCached = 0;
-    int nLastPercent = -1;
     const auto deserialize_start{SteadyClock::now()};
 
     // Load m_block_index
     while (pcursor->Valid()) {
         if (interrupt) return false;
-        
-        // Calculate and display percentage progress
-        if (nTotal > 0) {
-            int nPercent = 100 * nCount / nTotal;
-            if (nPercent > nLastPercent && nPercent % 10 == 0) {
-                uiInterface.InitMessage(strprintf(_("Loading blocks... %d%%").translated, nPercent));
-                nLastPercent = nPercent;
-            }
-        }
+
         nCount++;
         std::pair<uint8_t, uint256> key;
         if (pcursor->GetKey(key) && key.first == DB_BLOCK_INDEX) {
@@ -339,6 +313,15 @@ std::vector<CBlockIndex*> BlockManager::GetAllBlockIndicesByCompactId()
         Assert(index != nullptr);
     }
     return ordered;
+}
+
+std::vector<CBlockIndex*> BlockManager::TakeStartupBlockIndexView()
+{
+    AssertLockHeld(cs_main);
+
+    std::vector<CBlockIndex*> view{std::move(m_startup_block_index_view)};
+    m_startup_block_index_view.clear();
+    return view;
 }
 
 fs::path BlockManager::CompactBlockIndexShadowPath() const
@@ -2802,6 +2785,12 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
         }
         break;
     }
+
+    // ChainstateManager immediately needs to traverse every loaded index to
+    // rebuild candidate and best-header state. Preserve this already-built,
+    // height-ordered view across the handoff instead of rescanning the entire
+    // legacy unordered_map into another 24M-entry pointer vector.
+    m_startup_block_index_view = std::move(vSortedByHeight);
 
     return true;
 }

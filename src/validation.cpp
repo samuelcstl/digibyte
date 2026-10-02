@@ -5688,9 +5688,17 @@ bool ChainstateManager::LoadBlockIndex()
         m_blockman.ScanAndUnlinkAlreadyPrunedFiles();
 
         const auto collect_start{SteadyClock::now()};
-        std::vector<CBlockIndex*> vSortedByHeight{m_blockman.GetAllBlockIndicesByCompactId()};
-        LogPrintf("Startup timing: second block-index compact-id view: %d entries in %d ms\n",
-                  vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - collect_start));
+        std::vector<CBlockIndex*> vSortedByHeight{m_blockman.TakeStartupBlockIndexView()};
+        if (vSortedByHeight.empty() && !m_blockman.m_block_index.empty()) {
+            // Defensive fallback for unusual initialization paths. Normal
+            // startup receives the view built by BlockManager::LoadBlockIndex().
+            vSortedByHeight = m_blockman.GetAllBlockIndicesByCompactId();
+            LogPrintf("Startup timing: startup block-index view unavailable; rebuilt %d entries in %d ms\n",
+                      vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - collect_start));
+        } else {
+            LogPrintf("Startup timing: reused block-index startup view: %d entries in %d ms\n",
+                      vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - collect_start));
+        }
 
         const auto candidates_start{SteadyClock::now()};
         for (CBlockIndex* pindex : vSortedByHeight) {
