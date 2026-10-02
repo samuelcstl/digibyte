@@ -13,6 +13,7 @@
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 
+#include <algorithm>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -125,7 +126,7 @@ bool CompactBlockIndexLookup::Build(
             auto* slots{reinterpret_cast<CompactBlockIndexLookupSlot*>(
                 base + sizeof(CompactBlockIndexLookupHeader))};
 
-            std::memset(slots, 0xff, slots_bytes);
+            std::fill_n(slots, slot_count, CompactBlockIndexLookupSlot{});
 
             const uint64_t mask{slot_count - 1};
             for (uint64_t raw_id = 0; raw_id < source.EntryCount(); ++raw_id) {
@@ -364,7 +365,7 @@ std::optional<BlockIndexId> CompactBlockIndexLookup::FindResident(
         if (probes) *probes = static_cast<uint32_t>(probe + 1);
 
         const bool occupied{
-            (m_resident_occupancy[pos >> 6] >> (pos & 63)) & uint64_t{1}};
+            ((m_resident_occupancy[pos >> 6] >> (pos & 63)) & uint64_t{1}) != 0};
         if (!occupied) {
             return std::nullopt;
         }
