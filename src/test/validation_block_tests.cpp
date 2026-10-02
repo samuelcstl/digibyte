@@ -928,6 +928,28 @@ BOOST_AUTO_TEST_CASE(block_index_store_payload_cache_indirection)
     BOOST_CHECK_EQUAL(stats.backing_reads, 2U);
     BOOST_CHECK_EQUAL(stats.payload_cache_evictions, 1U);
     BOOST_CHECK_EQUAL(stats.no_io_violations, 0U);
+
+    const uint256 hash_d{uint256S("04")};
+    auto [it_d, inserted_d] = store.try_emplace(hash_d);
+    BOOST_REQUIRE(inserted_d);
+    CBlockIndex& d{it_d->second};
+    d.m_compact_id = 3;
+    d.nHeight = 3;
+    d.pprev = &c;
+    d.StorageFile() = 13;
+
+    store.UpdateHotWindow(&d);
+    BOOST_CHECK(d.HasResidentPayload());
+
+    BOOST_CHECK_EQUAL(a.StorageFile(), 10);
+    BOOST_CHECK(d.HasResidentPayload());
+    BOOST_CHECK(!c.HasResidentPayload());
+
+    const size_t resident_before_disable{store.ResidentPayloads()};
+    store.DisablePayloadEviction();
+    BOOST_CHECK_EQUAL(b.TimeMax(), 101U);
+    BOOST_CHECK(store.ResidentPayloads() > resident_before_disable);
+    BOOST_CHECK(!store.PayloadEvictionEnabled());
 }
 
 BOOST_AUTO_TEST_CASE(block_index_store_full_residency_invariants)
