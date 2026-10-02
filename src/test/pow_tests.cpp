@@ -305,6 +305,9 @@ BOOST_AUTO_TEST_CASE(digibyte_algo_history_residency_equivalence)
         ALGO_SHA256D, ALGO_SCRYPT, ALGO_SKEIN, ALGO_QUBIT, ALGO_ODO,
     };
 
+    // The store must outlive any standalone indexes whose payloads it owns.
+    node::BlockIndexStore store{node::BlockIndexResidencyMode::BALANCED, 30};
+
     std::vector<CBlockIndex> blocks(120);
     for (size_t i = 0; i < blocks.size(); ++i) {
         blocks[i].pprev = i ? &blocks[i - 1] : nullptr;
@@ -313,9 +316,9 @@ BOOST_AUTO_TEST_CASE(digibyte_algo_history_residency_equivalence)
         blocks[i].nTime = 1'700'000'000 + i * 15;
     }
 
-    node::BlockIndexStore store{node::BlockIndexResidencyMode::BALANCED, 30};
     BOOST_CHECK_EQUAL(store.PrewarmAlgoHistory(&blocks.back()), 30U);
     BOOST_CHECK_EQUAL(store.ResidentPayloads(), 30U);
+    BOOST_CHECK_EQUAL(store.ResidentAlgoPayloads(), 30U);
     BOOST_CHECK(!blocks[89].HasResidentAlgoHistory());
     BOOST_CHECK(blocks[90].HasResidentAlgoHistory());
 
