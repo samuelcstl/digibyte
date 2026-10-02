@@ -1,14 +1,24 @@
 # Block-index residency audit
 
-> **Status note (Generation 2):** this document is the detailed residency and
-> hot-path audit that motivated the first implementation. The `lastAlgoBlocks`
-> payload extraction and no-I/O scopes described here have since been
-> implemented and measured. The canonical current architecture, migration
-> lifecycle, compatibility contract, lookup work and remaining pointer-owner
-> conversion roadmap now live in `doc/block-index-compact-store.md`. The
-> access-pattern, pin/lease, GETHEADERS, deep-reorg, instrumentation and
-> acceptance-criteria material below remains active design input rather than
-> obsolete history.
+> **Status note (Generation 2):** this document remains the governing residency
+> design. The compact store is the backing representation for this policy, not
+> a replacement API that validation/mining code must adopt directly. Existing
+> hot code continues to use stable `CBlockIndex*` identities; residency
+> indirection decides which payload domains are resident. Long-lived owners are
+> converted to ids/leases only when their lifetime would otherwise prevent a
+> desired eviction.
+>
+> The first real historical payload-cache cut-over is now implemented for
+> measurement: `nFile/nDataPos/nUndoPos`, `hashMerkleRoot` and `nTimeMax`
+> moved behind `BlockIndexStore`, reducing the 64-bit stable shell from 152
+> bytes to 112 bytes. `full` retains eager compatibility residency while
+> `balanced` and `lowmem` pin the active hot window and use a bounded
+> historical payload cache backed by the verified compact base plus live delta.
+> The missing `-blockindexcache=<MiB>` policy knob has been restored.
+>
+> The immediate acceptance gate is measured RSS and live-path behavior. Lookup
+> generation rollover, deeper shell eviction and exhaustive lifecycle hardening
+> are deliberately deferred unless required by that measured hybrid path.
 
 ## Scope
 
