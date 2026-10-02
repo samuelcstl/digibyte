@@ -272,7 +272,7 @@ public:
     }
     [[nodiscard]] size_t ResidentAlgoPayloads() const noexcept
     {
-        return m_algo_payloads.size();
+        return m_full_algo_payloads.size() + m_cached_algo_payloads.size();
     }
     [[nodiscard]] uint64_t ResidentPayloadBytes() const noexcept
     {
@@ -333,19 +333,27 @@ public:
         auto& payload{MaterializeBlockIndexPayload(index)};
         if (payload.algo_history) return payload;
 
-        m_algo_payloads.emplace_back();
-        BlockIndexAlgoHistory& history{m_algo_payloads.back()};
+        BlockIndexAlgoHistory* history{nullptr};
+        if (m_mode == BlockIndexResidencyMode::FULL) {
+            m_full_algo_payloads.emplace_back();
+            history = &m_full_algo_payloads.back();
+        } else {
+            auto [it, inserted]{m_cached_algo_payloads.try_emplace(&index)};
+            assert(inserted);
+            history = &it->second;
+        }
+
         if (index.pprev && index.pprev->HasResidentAlgoHistory()) {
-            history.last_algo_blocks =
+            history->last_algo_blocks =
                 index.pprev->m_resident_payload->algo_history->last_algo_blocks;
         } else {
-            history.last_algo_blocks.fill(nullptr);
+            history->last_algo_blocks.fill(nullptr);
         }
         const int algo{index.GetAlgo()};
         if (algo >= 0 && algo < NUM_ALGOS_IMPL) {
-            history.last_algo_blocks[algo] = &index;
+            history->last_algo_blocks[algo] = &index;
         }
-        payload.algo_history = &history;
+        payload.algo_history = history;
         ++m_stats.algo_payloads_created;
         return payload;
     }
@@ -435,6 +443,10 @@ public:
         std::deque<BlockIndexResidentPayload>{}.swap(m_bootstrap_payloads);
         m_payload_cache_lru.clear();
         m_payload_cache_index.clear();
+        m_cached_algo_payloads.clear();
+        for (auto& [_, payload] : hot) {
+            payload.algo_history = nullptr;
+        }
         m_payload_pins.clear();
         m_hot_window.clear();
         m_payload_loader = std::move(loader);
@@ -520,6 +532,7 @@ private:
             // temporary budget overflow rather than dropping unflushed state.
             if (victim == m_payload_cache_lru.end()) break;
 
+            m_cached_algo_payloads.erase(victim->index);
             victim->index->ClearResidentPayload();
             m_payload_cache_index.erase(victim->index);
             m_payload_cache_lru.erase(victim);
@@ -578,7 +591,8 @@ private:
     size_t m_cache_limit_bytes{kernel::DEFAULT_BLOCK_INDEX_CACHE_MIB_BALANCED * 1024 * 1024};
 
     std::deque<BlockIndexResidentPayload> m_bootstrap_payloads;
-    std::deque<BlockIndexAlgoHistory> m_algo_payloads;
+    std::deque<BlockIndexAlgoHistory> m_full_algo_payloads;
+    std::unordered_map<CBlockIndex*, BlockIndexAlgoHistory> m_cached_algo_payloads;
     std::list<CacheEntry> m_payload_cache_lru;
     std::unordered_map<CBlockIndex*, std::list<CacheEntry>::iterator> m_payload_cache_index;
     std::unordered_map<CBlockIndex*, uint32_t> m_payload_pins;
