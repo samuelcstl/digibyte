@@ -4209,7 +4209,9 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                         fInvalidFound,
                         connectTrace)};
 
-                m_blockman.m_block_index.UpdateHotWindow(m_chain.Tip());
+                if (this == &m_chainman.ActiveChainstate()) {
+                    m_blockman.m_block_index.UpdateHotWindow(m_chain.Tip());
+                }
 
                 for (CBlockIndex* p : residency_pins) {
                     m_blockman.m_block_index.ReleasePayloadPin(*p);
@@ -4406,7 +4408,7 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
         // unconditionally valid already, so force disconnect away from it.
         DisconnectedBlockTransactions disconnectpool{MAX_DISCONNECTED_TX_POOL_SIZE * 1000};
         bool ret = DisconnectTip(state, &disconnectpool);
-        if (ret) {
+        if (ret && this == &m_chainman.ActiveChainstate()) {
             m_blockman.m_block_index.UpdateHotWindow(m_chain.Tip());
         }
         // DisconnectTip will add transactions to disconnectpool.
@@ -4979,6 +4981,8 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
 
     // Check for duplicate
     uint256 hash = block.GetHash();
+    std::optional<node::BlockIndexStore::PayloadPinGuard> parent_payload_pin;
+    std::optional<node::BlockIndexStore::NoIOGuard> block_index_no_io;
     BlockMap::iterator miSelf{m_blockman.m_block_index.find(hash)};
     if (hash != GetConsensus().hashGenesisBlock) {
         if (miSelf != m_blockman.m_block_index.end()) {
@@ -5011,8 +5015,8 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
         }
 
-        auto parent_payload_pin = m_blockman.m_block_index.PinPayloadScoped(*pindexPrev);
-        auto block_index_no_io = m_blockman.m_block_index.EnterNoIO();
+        parent_payload_pin.emplace(m_blockman.m_block_index, *pindexPrev);
+        block_index_no_io.emplace(m_blockman.m_block_index);
 
         if (!ContextualCheckBlockHeader(block, state, m_blockman, *this, pindexPrev, m_options.adjusted_time_callback())) {
             LogPrint(BCLog::VALIDATION, "%s: Consensus::ContextualCheckBlockHeader: %s, %s\n", __func__, hash.ToString(), state.ToString());
@@ -5058,6 +5062,11 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
             }
         }
     }
+
+    if (!block_index_no_io) {
+        block_index_no_io.emplace(m_blockman.m_block_index);
+    }
+
     if (!min_pow_checked) {
         LogPrint(BCLog::VALIDATION, "%s: not adding new block header %s, missing anti-dos proof-of-work validation\n", __func__, hash.ToString());
         return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "too-little-chainwork");
@@ -6430,6 +6439,11 @@ bool ChainstateManager::ActivateSnapshot(
     m_snapshot_chainstate->m_mempool = m_active_chainstate->m_mempool;
     m_active_chainstate->m_mempool = nullptr;
     m_active_chainstate = m_snapshot_chainstate.get();
+
+    m_blockman.ActivateBlockIndexPayloadCache(m_active_chainstate->m_chain.Tip());
+    m_blockman.m_block_index.UpdateHotWindow(m_active_chainstate->m_chain.Tip());
+    m_blockman.m_block_index.PrewarmAlgoHistory(m_active_chainstate->m_chain.Tip());
+
     m_blockman.m_snapshot_height = this->GetSnapshotBaseHeight();
 
     LogPrintf("[snapshot] successfully activated snapshot %s\n", base_blockhash.ToString());
