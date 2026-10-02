@@ -4558,6 +4558,9 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
 void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockIndex* pindexNew, const FlatFilePos& pos)
 {
     AssertLockHeld(cs_main);
+    if (m_blockman.m_dirty_blockindex.insert(pindexNew).second) {
+        m_blockman.m_block_index.PinPayload(*pindexNew);
+    }
     pindexNew->nTx = block.vtx.size();
     pindexNew->nChainTx = 0;
     pindexNew->StorageFile() = pos.nFile;
@@ -4568,9 +4571,6 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
         pindexNew->nStatus |= BLOCK_OPT_WITNESS;
     }
     pindexNew->RaiseValidity(BLOCK_VALID_TRANSACTIONS);
-    if (m_blockman.m_dirty_blockindex.insert(pindexNew).second) {
-        m_blockman.m_block_index.PinPayload(*pindexNew);
-    }
 
     if (pindexNew->pprev == nullptr || pindexNew->pprev->HaveNumChainTxs()) {
         // If pindexNew is the genesis block or all parents are BLOCK_VALID_TRANSACTIONS.

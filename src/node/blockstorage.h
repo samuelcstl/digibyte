@@ -124,6 +124,39 @@ struct BlockIndexResidencyStats {
  */
 class BlockIndexStore : public BlockIndexPayloadProvider
 {
+    template <typename T, size_t CHUNK_ELEMENTS = 65536>
+    class StableArena
+    {
+    public:
+        T& emplace_back()
+        {
+            if (m_size % CHUNK_ELEMENTS == 0) {
+                m_chunks.push_back(std::make_unique<T[]>(CHUNK_ELEMENTS));
+            }
+            T& value{m_chunks.back()[m_size % CHUNK_ELEMENTS]};
+            ++m_size;
+            return value;
+        }
+
+        T& back()
+        {
+            assert(m_size > 0);
+            return m_chunks.back()[(m_size - 1) % CHUNK_ELEMENTS];
+        }
+
+        [[nodiscard]] size_t size() const noexcept { return m_size; }
+
+        void clear()
+        {
+            m_chunks.clear();
+            m_size = 0;
+        }
+
+    private:
+        std::vector<std::unique_ptr<T[]>> m_chunks;
+        size_t m_size{0};
+    };
+
 public:
     using PayloadLoader = std::function<bool(const CBlockIndex&, BlockIndexResidentPayload&)>;
 
@@ -450,7 +483,7 @@ public:
         }
 
         for (auto& [_, index] : m_entries) index.ClearResidentPayload();
-        std::deque<BlockIndexResidentPayload>{}.swap(m_bootstrap_payloads);
+        m_bootstrap_payloads.clear();
         m_payload_cache_lru.clear();
         m_payload_cache_index.clear();
         m_cached_algo_payloads.clear();
@@ -600,8 +633,8 @@ private:
     size_t m_hot_depth{kernel::DEFAULT_BLOCK_INDEX_HOT_DEPTH};
     size_t m_cache_limit_bytes{kernel::DEFAULT_BLOCK_INDEX_CACHE_MIB_BALANCED * 1024 * 1024};
 
-    std::deque<BlockIndexResidentPayload> m_bootstrap_payloads;
-    std::deque<BlockIndexAlgoHistory> m_full_algo_payloads;
+    StableArena<BlockIndexResidentPayload> m_bootstrap_payloads;
+    StableArena<BlockIndexAlgoHistory> m_full_algo_payloads;
     std::unordered_map<CBlockIndex*, BlockIndexAlgoHistory> m_cached_algo_payloads;
     std::list<CacheEntry> m_payload_cache_lru;
     std::unordered_map<CBlockIndex*, std::list<CacheEntry>::iterator> m_payload_cache_index;

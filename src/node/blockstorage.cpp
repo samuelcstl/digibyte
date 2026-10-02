@@ -2384,15 +2384,18 @@ void BlockManager::PruneOneBlockFile(const int fileNumber)
 
     for (auto& entry : m_block_index) {
         CBlockIndex* pindex = &entry.second;
+        if (!(pindex->nStatus & BLOCK_HAVE_DATA)) {
+            continue;
+        }
         if (pindex->StorageFile() == fileNumber) {
+            if (m_dirty_blockindex.insert(pindex).second) {
+                m_block_index.PinPayload(*pindex);
+            }
             pindex->nStatus &= ~BLOCK_HAVE_DATA;
             pindex->nStatus &= ~BLOCK_HAVE_UNDO;
             pindex->StorageFile() = 0;
             pindex->DataPos() = 0;
             pindex->UndoPos() = 0;
-            if (m_dirty_blockindex.insert(pindex).second) {
-                m_block_index.PinPayload(*pindex);
-            }
 
             // Prune from m_blocks_unlinked -- any block we prune would have
             // to be downloaded again in order to consider its chain, at which
@@ -3412,11 +3415,11 @@ bool BlockManager::WriteUndoDataForBlock(const CBlockUndo& blockundo, BlockValid
             cursor.undo_height = block.nHeight;
         }
         // update nUndoPos in block index
-        block.UndoPos() = _pos.nPos;
-        block.nStatus |= BLOCK_HAVE_UNDO;
         if (m_dirty_blockindex.insert(&block).second) {
             m_block_index.PinPayload(block);
         }
+        block.UndoPos() = _pos.nPos;
+        block.nStatus |= BLOCK_HAVE_UNDO;
     }
 
     return true;

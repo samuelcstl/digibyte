@@ -952,6 +952,31 @@ BOOST_AUTO_TEST_CASE(block_index_store_payload_cache_indirection)
     BOOST_CHECK(!store.PayloadEvictionEnabled());
 }
 
+BOOST_AUTO_TEST_CASE(block_index_store_bootstrap_arena_pointer_stability)
+{
+    BlockIndexStore store{BlockIndexResidencyMode::BALANCED, 8};
+
+    const uint256 first_hash{uint256S("01")};
+    auto [first_it, first_inserted] = store.try_emplace(first_hash);
+    BOOST_REQUIRE(first_inserted);
+    CBlockIndex& first{first_it->second};
+    first.StorageFile() = 77;
+    BlockIndexResidentPayload* first_payload{first.m_resident_payload};
+    BOOST_REQUIRE(first_payload);
+
+    for (uint32_t i = 2; i < 140000; ++i) {
+        uint256 hash;
+        hash.SetUint64(i);
+        auto [it, inserted] = store.try_emplace(hash);
+        BOOST_REQUIRE(inserted);
+        it->second.StorageFile() = static_cast<int>(i & 0x7fffffff);
+    }
+
+    BOOST_CHECK(first.m_resident_payload == first_payload);
+    BOOST_CHECK_EQUAL(first.StorageFile(), 77);
+    BOOST_CHECK_EQUAL(store.ResidentPayloads(), 139999U);
+}
+
 BOOST_AUTO_TEST_CASE(block_index_store_full_residency_invariants)
 {
     BlockIndexStore store;
