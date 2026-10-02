@@ -1526,7 +1526,7 @@ bool BlockManager::BuildCompactBlockIndexDelta(
     return true;
 }
 
-bool BlockManager::CompactBlockIndexDelta()
+bool BlockManager::CompactBlockIndexMetadata()
 {
     AssertLockHeld(cs_main);
 
@@ -2690,7 +2690,7 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
         break;
     case kernel::BlockIndexCompactDeltaMode::COMPACT:
         if (!VerifyCompactBlockIndexDelta() ||
-            !CompactBlockIndexDelta() ||
+            !CompactBlockIndexMetadata() ||
             !VerifyCompactBlockIndexDelta()) {
             LogPrintf("Compact block index: metadata compaction/verification failed; continuing without metadata delta\n");
             m_compact_block_delta.reset();

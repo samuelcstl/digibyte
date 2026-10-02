@@ -399,7 +399,7 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool BuildCompactBlockIndexDelta(const std::vector<CBlockIndex*>& sorted)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    bool CompactBlockIndexDelta()
+    bool CompactBlockIndexMetadata()
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool VerifyCompactBlockIndexDelta()
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
