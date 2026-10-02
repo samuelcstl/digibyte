@@ -35,6 +35,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -309,6 +310,17 @@ public:
         return payload;
     }
 
+    void PinPayload(CBlockIndex& index)
+    {
+        MaterializeBlockIndexPayload(index);
+        if (m_cache_active) m_payload_pins.insert(&index);
+    }
+
+    void ReleasePayloadPin(CBlockIndex& index)
+    {
+        m_payload_pins.erase(&index);
+    }
+
     bool ActivatePayloadCache(CBlockIndex* tip, PayloadLoader loader)
     {
         if (m_mode == BlockIndexResidencyMode::FULL) {
@@ -329,6 +341,7 @@ public:
         m_pinned_payloads.clear();
         m_payload_cache_lru.clear();
         m_payload_cache_index.clear();
+        m_payload_pins.clear();
         m_payload_loader = std::move(loader);
         m_cache_active = true;
 
@@ -402,7 +415,19 @@ private:
     {
         const size_t max_cached{MaxCachedPayloads()};
         while (m_payload_cache_lru.size() >= max_cached) {
-            auto victim{std::prev(m_payload_cache_lru.end())};
+            auto victim{m_payload_cache_lru.end()};
+            for (auto it = m_payload_cache_lru.end(); it != m_payload_cache_lru.begin();) {
+                --it;
+                if (m_payload_pins.count(it->index) == 0) {
+                    victim = it;
+                    break;
+                }
+            }
+            // Dirty/new payloads remain pinned until the ordinary canonical
+            // block-index batch commits. If every candidate is pinned, allow
+            // temporary budget overflow rather than dropping unflushed state.
+            if (victim == m_payload_cache_lru.end()) break;
+
             victim->index->ClearResidentPayload();
             m_payload_cache_index.erase(victim->index);
             m_payload_cache_lru.erase(victim);
@@ -439,10 +464,10 @@ private:
     void InitializeStoreEntry(CBlockIndex& index)
     {
         index.SetPayloadProvider(this);
-        // A newly inserted entry is not necessarily durable yet. It must get
-        // an empty resident payload rather than trying to read its future
-        // compact record before the id/metadata transaction is published.
+        // A newly inserted entry is not durable yet. Give it an empty resident
+        // payload and pin it until WriteBlockIndexDB commits the normal batch.
         CreateEmptyPayload(index);
+        if (m_cache_active) m_payload_pins.insert(&index);
     }
 
     void NoteLookup(bool hit) const noexcept
@@ -464,6 +489,7 @@ private:
     std::deque<BlockIndexResidentPayload> m_pinned_payloads;
     std::list<CacheEntry> m_payload_cache_lru;
     std::unordered_map<CBlockIndex*, std::list<CacheEntry>::iterator> m_payload_cache_index;
+    std::unordered_set<CBlockIndex*> m_payload_pins;
     PayloadLoader m_payload_loader;
     bool m_cache_active{false};
 

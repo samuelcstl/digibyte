@@ -4520,6 +4520,7 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
     AssertLockHeld(cs_main);
     pindexNew->nTx = block.vtx.size();
     pindexNew->nChainTx = 0;
+    m_blockman.m_block_index.PinPayload(*pindexNew);
     pindexNew->StorageFile() = pos.nFile;
     pindexNew->DataPos() = pos.nPos;
     pindexNew->UndoPos() = 0;

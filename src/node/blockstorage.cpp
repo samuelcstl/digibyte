@@ -2384,6 +2384,7 @@ void BlockManager::PruneOneBlockFile(const int fileNumber)
     for (auto& entry : m_block_index) {
         CBlockIndex* pindex = &entry.second;
         if (pindex->StorageFile() == fileNumber) {
+            m_block_index.PinPayload(*pindex);
             pindex->nStatus &= ~BLOCK_HAVE_DATA;
             pindex->nStatus &= ~BLOCK_HAVE_UNDO;
             pindex->StorageFile() = 0;
@@ -2860,10 +2861,24 @@ bool BlockManager::WriteBlockIndexDB()
     // The ordinary upstream block index is canonical. Only after its atomic
     // batch succeeds do we publish the staged compact records. If publication
     // fails, leave the pending batch intact so startup can finish the commit.
+    bool compact_metadata_published{!metadata_staged};
     if (metadata_staged && !PublishCompactBlockIndexDeltaPending()) {
         LogPrintf("Compact block index: disabling metadata delta after publish failure; pending batch retained for restart recovery\n");
         m_compact_block_delta_log.reset();
         m_compact_block_delta.reset();
+        compact_metadata_published = false;
+    } else if (metadata_staged) {
+        compact_metadata_published = true;
+    }
+
+    // Do not let mutable payload state become evictable until both the
+    // canonical LevelDB batch and, when active, its compact metadata publish
+    // have completed. A failed compact publish intentionally keeps these
+    // payloads pinned so the running process cannot reload stale backing state.
+    if (compact_metadata_published) {
+        for (const CBlockIndex* index : vBlocks) {
+            m_block_index.ReleasePayloadPin(*const_cast<CBlockIndex*>(index));
+        }
     }
     return true;
 }
@@ -3392,6 +3407,7 @@ bool BlockManager::WriteUndoDataForBlock(const CBlockUndo& blockundo, BlockValid
             cursor.undo_height = block.nHeight;
         }
         // update nUndoPos in block index
+        m_block_index.PinPayload(block);
         block.UndoPos() = _pos.nPos;
         block.nStatus |= BLOCK_HAVE_UNDO;
         m_dirty_blockindex.insert(&block);
