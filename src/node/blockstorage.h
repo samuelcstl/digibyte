@@ -421,6 +421,16 @@ public:
             PinPayload(**it);
             m_hot_window.push_back(*it);
         }
+
+        // A cold historical branch can become active after its cached algo
+        // accelerators have been reclaimed. Rebuild only on this uncommon
+        // reorg/jump path, oldest to newest, so normal one-block growth stays
+        // constant-time.
+        for (CBlockIndex* index : m_hot_window) {
+            if (!index->HasResidentAlgoHistory()) {
+                EnsureAlgoHistory(*index);
+            }
+        }
     }
 
     bool ActivatePayloadCache(CBlockIndex* tip, PayloadLoader loader)
