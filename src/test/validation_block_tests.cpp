@@ -50,26 +50,27 @@ BOOST_FIXTURE_TEST_SUITE(validation_block_tests, MinerTestingSetup)
 
 BOOST_AUTO_TEST_CASE(compact_block_index_record_snapshot)
 {
-    CBlockIndex index;
+    CBlockHeader header;
+    CBlockIndex index{header};
     const BlockIndexId parent_id{123};
     const BlockIndexId skip_id{45};
 
     {
         LOCK(cs_main);
         index.nHeight = 456;
-        index.nFile = 7;
-        index.nDataPos = 1234;
-        index.nUndoPos = 5678;
+        index.StorageFile() = 7;
+        index.DataPos() = 1234;
+        index.UndoPos() = 5678;
         index.nChainWork = UintToArith256(uint256S("123456"));
         index.nTx = 11;
         index.nChainTx = 222;
         index.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO;
         index.nVersion = 0x20000000;
-        index.hashMerkleRoot = uint256S("abcdef");
+        index.MerkleRoot() = uint256S("abcdef");
         index.nTime = 1'700'000'000;
         index.nBits = 0x1d00ffff;
         index.nNonce = 42;
-        index.nTimeMax = 1'700'000'123;
+        index.TimeMax() = 1'700'000'123;
 
         const CompactBlockIndexRecord record{
             CompactBlockIndexRecord::FromBlockIndex(index, parent_id, skip_id)};
@@ -77,19 +78,19 @@ BOOST_AUTO_TEST_CASE(compact_block_index_record_snapshot)
         BOOST_CHECK_EQUAL(record.parent, parent_id);
         BOOST_CHECK_EQUAL(record.skip, skip_id);
         BOOST_CHECK_EQUAL(record.height, index.nHeight);
-        BOOST_CHECK_EQUAL(record.file, index.nFile);
-        BOOST_CHECK_EQUAL(record.data_pos, index.nDataPos);
-        BOOST_CHECK_EQUAL(record.undo_pos, index.nUndoPos);
+        BOOST_CHECK_EQUAL(record.file, index.StorageFile());
+        BOOST_CHECK_EQUAL(record.data_pos, index.DataPos());
+        BOOST_CHECK_EQUAL(record.undo_pos, index.UndoPos());
         BOOST_CHECK(record.chain_work == ArithToUint256(index.nChainWork));
         BOOST_CHECK_EQUAL(record.tx_count, index.nTx);
         BOOST_CHECK_EQUAL(record.chain_tx_count, index.nChainTx);
         BOOST_CHECK_EQUAL(record.status, index.nStatus);
         BOOST_CHECK_EQUAL(record.version, index.nVersion);
-        BOOST_CHECK(record.merkle_root == index.hashMerkleRoot);
+        BOOST_CHECK(record.merkle_root == index.MerkleRoot());
         BOOST_CHECK_EQUAL(record.time, index.nTime);
         BOOST_CHECK_EQUAL(record.bits, index.nBits);
         BOOST_CHECK_EQUAL(record.nonce, index.nNonce);
-        BOOST_CHECK_EQUAL(record.time_max, index.nTimeMax);
+        BOOST_CHECK_EQUAL(record.time_max, index.TimeMax());
     }
 
     BOOST_CHECK_EQUAL(sizeof(CompactBlockIndexRecord), 120U);
@@ -102,9 +103,10 @@ BOOST_AUTO_TEST_CASE(compact_block_index_record_snapshot)
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexDeltaLogHeader), 128U);
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexDeltaLogRecord), 168U);
     if constexpr (sizeof(void*) == 8) {
-        // m_compact_id consumes the former alignment padding before the payload
-        // pointer; generation-2 preparation must not grow the balanced shell.
-        BOOST_CHECK_EQUAL(sizeof(CBlockIndex), 152U);
+        // Historical storage/merkle/time-max domains now live behind the
+        // residency payload. The stable identity/topology shell shrinks from
+        // 152 to 112 bytes while retaining pointer identity.
+        BOOST_CHECK_EQUAL(sizeof(CBlockIndex), 112U);
     }
 }
 
