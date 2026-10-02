@@ -139,6 +139,31 @@ public:
     using const_iterator = BlockMap::const_iterator;
     using size_type = BlockMap::size_type;
 
+    class PayloadPinGuard
+    {
+    public:
+        PayloadPinGuard(BlockIndexStore& store, CBlockIndex& index)
+            : m_store{&store}, m_index{&index}
+        {
+            m_store->PinPayload(index);
+        }
+        PayloadPinGuard(const PayloadPinGuard&) = delete;
+        PayloadPinGuard& operator=(const PayloadPinGuard&) = delete;
+        PayloadPinGuard(PayloadPinGuard&& other) noexcept
+            : m_store{std::exchange(other.m_store, nullptr)},
+              m_index{std::exchange(other.m_index, nullptr)}
+        {
+        }
+        PayloadPinGuard& operator=(PayloadPinGuard&&) = delete;
+        ~PayloadPinGuard()
+        {
+            if (m_store && m_index) m_store->ReleasePayloadPin(*m_index);
+        }
+    private:
+        BlockIndexStore* m_store;
+        CBlockIndex* m_index;
+    };
+
     class NoIOGuard
     {
     public:
@@ -243,11 +268,16 @@ public:
     [[nodiscard]] BlockIndexResidencyStats GetResidencyStats() const noexcept { return m_stats; }
     [[nodiscard]] size_t ResidentPayloads() const noexcept
     {
-        return m_bootstrap_payloads.size() + m_pinned_payloads.size() + m_payload_cache_lru.size();
+        return m_bootstrap_payloads.size() + m_payload_cache_lru.size();
+    }
+    [[nodiscard]] size_t ResidentAlgoPayloads() const noexcept
+    {
+        return m_algo_payloads.size();
     }
     [[nodiscard]] uint64_t ResidentPayloadBytes() const noexcept
     {
-        return static_cast<uint64_t>(ResidentPayloads()) * sizeof(BlockIndexResidentPayload);
+        return static_cast<uint64_t>(ResidentPayloads()) * sizeof(BlockIndexResidentPayload) +
+               static_cast<uint64_t>(ResidentAlgoPayloads()) * sizeof(BlockIndexAlgoHistory);
     }
     [[nodiscard]] size_t CacheLimitBytes() const noexcept { return m_cache_limit_bytes; }
 
@@ -301,16 +331,21 @@ public:
     BlockIndexResidentPayload& EnsureAlgoHistory(CBlockIndex& index)
     {
         auto& payload{MaterializeBlockIndexPayload(index)};
-        if (payload.algo_history_valid) return payload;
+        if (payload.algo_history) return payload;
 
+        m_algo_payloads.emplace_back();
+        BlockIndexAlgoHistory& history{m_algo_payloads.back()};
         if (index.pprev && index.pprev->HasResidentAlgoHistory()) {
-            payload.last_algo_blocks = index.pprev->m_resident_payload->last_algo_blocks;
+            history.last_algo_blocks =
+                index.pprev->m_resident_payload->algo_history->last_algo_blocks;
         } else {
-            payload.last_algo_blocks.fill(nullptr);
+            history.last_algo_blocks.fill(nullptr);
         }
         const int algo{index.GetAlgo()};
-        if (algo >= 0 && algo < NUM_ALGOS_IMPL) payload.last_algo_blocks[algo] = &index;
-        payload.algo_history_valid = true;
+        if (algo >= 0 && algo < NUM_ALGOS_IMPL) {
+            history.last_algo_blocks[algo] = &index;
+        }
+        payload.algo_history = &history;
         ++m_stats.algo_payloads_created;
         return payload;
     }
@@ -329,6 +364,57 @@ public:
         if (--it->second == 0) m_payload_pins.erase(it);
     }
 
+    PayloadPinGuard PinPayloadScoped(CBlockIndex& index)
+    {
+        return PayloadPinGuard{*this, index};
+    }
+
+    void DisablePayloadEviction() noexcept
+    {
+        m_eviction_enabled = false;
+    }
+
+    [[nodiscard]] bool PayloadEvictionEnabled() const noexcept
+    {
+        return m_eviction_enabled;
+    }
+
+    void UpdateHotWindow(CBlockIndex* tip)
+    {
+        if (m_mode == BlockIndexResidencyMode::FULL || !m_cache_active) return;
+
+        if (m_hot_depth == 0 || !tip) {
+            for (CBlockIndex* index : m_hot_window) ReleasePayloadPin(*index);
+            m_hot_window.clear();
+            return;
+        }
+        if (!m_hot_window.empty() && m_hot_window.back() == tip) return;
+
+        if (!m_hot_window.empty() && tip->pprev == m_hot_window.back()) {
+            PinPayload(*tip);
+            m_hot_window.push_back(tip);
+            while (m_hot_window.size() > m_hot_depth) {
+                CBlockIndex* old{m_hot_window.front()};
+                m_hot_window.pop_front();
+                ReleasePayloadPin(*old);
+            }
+            return;
+        }
+
+        for (CBlockIndex* index : m_hot_window) ReleasePayloadPin(*index);
+        m_hot_window.clear();
+
+        std::vector<CBlockIndex*> desired;
+        desired.reserve(std::min<size_t>(m_hot_depth, static_cast<size_t>(tip->nHeight) + 1));
+        for (CBlockIndex* index{tip}; index && desired.size() < m_hot_depth; index = index->pprev) {
+            desired.push_back(index);
+        }
+        for (auto it = desired.rbegin(); it != desired.rend(); ++it) {
+            PinPayload(**it);
+            m_hot_window.push_back(*it);
+        }
+    }
+
     bool ActivatePayloadCache(CBlockIndex* tip, PayloadLoader loader)
     {
         if (m_mode == BlockIndexResidencyMode::FULL) {
@@ -336,6 +422,7 @@ public:
             return true;
         }
         if (!tip || !loader) return false;
+        if (m_cache_active) return true;
 
         std::vector<std::pair<CBlockIndex*, BlockIndexResidentPayload>> hot;
         hot.reserve(std::min<size_t>(m_hot_depth, static_cast<size_t>(tip->nHeight) + 1));
@@ -346,16 +433,18 @@ public:
 
         for (auto& [_, index] : m_entries) index.ClearResidentPayload();
         std::deque<BlockIndexResidentPayload>{}.swap(m_bootstrap_payloads);
-        m_pinned_payloads.clear();
         m_payload_cache_lru.clear();
         m_payload_cache_index.clear();
         m_payload_pins.clear();
+        m_hot_window.clear();
         m_payload_loader = std::move(loader);
         m_cache_active = true;
+        m_eviction_enabled = true;
 
         for (auto it = hot.rbegin(); it != hot.rend(); ++it) {
-            m_pinned_payloads.push_back(std::move(it->second));
-            it->first->AttachResidentPayload(&m_pinned_payloads.back());
+            InsertCachedPayload(*it->first, std::move(it->second));
+            ++m_payload_pins[it->first];
+            m_hot_window.push_back(it->first);
         }
         return true;
     }
@@ -410,17 +499,12 @@ private:
 
     size_t MaxCachedPayloads() const noexcept
     {
-        const size_t payload_size{sizeof(BlockIndexResidentPayload)};
-        const size_t pinned_bytes{m_pinned_payloads.size() * payload_size};
-        const size_t discretionary_budget{
-            m_cache_limit_bytes > pinned_bytes
-                ? m_cache_limit_bytes - pinned_bytes
-                : 0};
-        return std::max<size_t>(1, discretionary_budget / payload_size);
+        return std::max<size_t>(1, m_cache_limit_bytes / sizeof(BlockIndexResidentPayload));
     }
 
     void EvictCachedPayloadIfNeeded()
     {
+        if (!m_eviction_enabled) return;
         const size_t max_cached{MaxCachedPayloads()};
         while (m_payload_cache_lru.size() >= max_cached) {
             auto victim{m_payload_cache_lru.end()};
@@ -494,12 +578,14 @@ private:
     size_t m_cache_limit_bytes{kernel::DEFAULT_BLOCK_INDEX_CACHE_MIB_BALANCED * 1024 * 1024};
 
     std::deque<BlockIndexResidentPayload> m_bootstrap_payloads;
-    std::deque<BlockIndexResidentPayload> m_pinned_payloads;
+    std::deque<BlockIndexAlgoHistory> m_algo_payloads;
     std::list<CacheEntry> m_payload_cache_lru;
     std::unordered_map<CBlockIndex*, std::list<CacheEntry>::iterator> m_payload_cache_index;
     std::unordered_map<CBlockIndex*, uint32_t> m_payload_pins;
+    std::deque<CBlockIndex*> m_hot_window;
     PayloadLoader m_payload_loader;
     bool m_cache_active{false};
+    bool m_eviction_enabled{true};
 
     mutable BlockIndexResidencyStats m_stats;
     uint32_t m_no_io_depth{0};

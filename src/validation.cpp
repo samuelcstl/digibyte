@@ -4209,6 +4209,8 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                         fInvalidFound,
                         connectTrace)};
 
+                m_blockman.m_block_index.UpdateHotWindow(m_chain.Tip());
+
                 for (CBlockIndex* p : residency_pins) {
                     m_blockman.m_block_index.ReleasePayloadPin(*p);
                 }
@@ -4404,6 +4406,9 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
         // unconditionally valid already, so force disconnect away from it.
         DisconnectedBlockTransactions disconnectpool{MAX_DISCONNECTED_TX_POOL_SIZE * 1000};
         bool ret = DisconnectTip(state, &disconnectpool);
+        if (ret) {
+            m_blockman.m_block_index.UpdateHotWindow(m_chain.Tip());
+        }
         // DisconnectTip will add transactions to disconnectpool.
         // Adjust the mempool to be consistent with the new tip, adding
         // transactions back to the mempool if disconnecting was successful,
@@ -4971,7 +4976,6 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
 bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked)
 {
     AssertLockHeld(cs_main);
-    auto block_index_no_io = m_blockman.m_block_index.EnterNoIO();
 
     // Check for duplicate
     uint256 hash = block.GetHash();
@@ -5006,6 +5010,10 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
             LogPrint(BCLog::VALIDATION, "header %s has prev block invalid: %s\n", hash.ToString(), block.hashPrevBlock.ToString());
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
         }
+
+        auto parent_payload_pin = m_blockman.m_block_index.PinPayloadScoped(*pindexPrev);
+        auto block_index_no_io = m_blockman.m_block_index.EnterNoIO();
+
         if (!ContextualCheckBlockHeader(block, state, m_blockman, *this, pindexPrev, m_options.adjusted_time_callback())) {
             LogPrint(BCLog::VALIDATION, "%s: Consensus::ContextualCheckBlockHeader: %s, %s\n", __func__, hash.ToString(), state.ToString());
             return false;
@@ -5140,7 +5148,6 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
 
     if (fNewBlock) *fNewBlock = false;
     AssertLockHeld(cs_main);
-    auto block_index_no_io = m_blockman.m_block_index.EnterNoIO();
 
     CBlockIndex *pindexDummy = nullptr;
     CBlockIndex *&pindex = ppindex ? *ppindex : pindexDummy;
@@ -5150,6 +5157,8 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
 
     if (!accepted_header)
         return false;
+
+    auto block_index_no_io = m_blockman.m_block_index.EnterNoIO();
 
     // Check all requested blocks that we do not already have for validity and
     // save them to disk. Skip processing of unrequested blocks as an anti-DoS

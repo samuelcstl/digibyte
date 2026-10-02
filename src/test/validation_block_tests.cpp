@@ -107,6 +107,8 @@ BOOST_AUTO_TEST_CASE(compact_block_index_record_snapshot)
         // residency payload. The stable identity/topology shell shrinks from
         // 152 to 112 bytes while retaining pointer identity.
         BOOST_CHECK_EQUAL(sizeof(CBlockIndex), 112U);
+        BOOST_CHECK_LE(sizeof(BlockIndexResidentPayload), 56U);
+        BOOST_CHECK_EQUAL(sizeof(BlockIndexAlgoHistory), sizeof(CBlockIndex*) * NUM_ALGOS_IMPL);
     }
 }
 

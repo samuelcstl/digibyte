@@ -151,6 +151,11 @@ public:
     virtual BlockIndexResidentPayload& MaterializeBlockIndexPayload(CBlockIndex& index) = 0;
 };
 
+struct BlockIndexAlgoHistory
+{
+    std::array<CBlockIndex*, NUM_ALGOS_IMPL> last_algo_blocks{};
+};
+
 struct BlockIndexResidentPayload
 {
     int nFile{0};
@@ -158,9 +163,7 @@ struct BlockIndexResidentPayload
     unsigned int nUndoPos{0};
     uint256 hashMerkleRoot{};
     unsigned int nTimeMax{0};
-
-    std::array<CBlockIndex*, NUM_ALGOS_IMPL> last_algo_blocks{};
-    bool algo_history_valid{false};
+    BlockIndexAlgoHistory* algo_history{nullptr};
 };
 
 /** The block chain is a tree shaped structure starting with the
@@ -223,10 +226,9 @@ public:
     /**
      * Generation-2 compact-store id.
      *
-     * On 64-bit builds this occupies the four bytes that were previously
-     * alignment padding before m_resident_payload, so the balanced CBlockIndex
-     * shell remains 152 bytes. It is assigned after the startup height sort and
-     * is not consensus state.
+     * This is runtime identity metadata, not consensus state. Historical
+     * storage/merkle/time-max fields now live behind the residency payload,
+     * leaving the stable 64-bit shell at 112 bytes.
      */
     uint32_t m_compact_id{std::numeric_limits<uint32_t>::max()};
 
@@ -261,12 +263,12 @@ public:
     [[nodiscard]] bool HasResidentPayload() const noexcept { return m_resident_payload != nullptr; }
     [[nodiscard]] bool HasResidentAlgoHistory() const noexcept
     {
-        return m_resident_payload && m_resident_payload->algo_history_valid;
+        return m_resident_payload && m_resident_payload->algo_history;
     }
     [[nodiscard]] CBlockIndex* GetResidentLastAlgoBlock(int algo) const noexcept
     {
         if (!HasResidentAlgoHistory() || algo < 0 || algo >= NUM_ALGOS_IMPL) return nullptr;
-        return m_resident_payload->last_algo_blocks[algo];
+        return m_resident_payload->algo_history->last_algo_blocks[algo];
     }
 
     int& StorageFile() { return ResidentPayload().nFile; }
@@ -475,19 +477,32 @@ class CDiskBlockIndex : public CBlockIndex
     static constexpr int CHAINWORK_VERSION = 260000;
 
     bool m_has_persisted_chainwork{false};
+    BlockIndexResidentPayload m_disk_payload{};
 
 public:
     uint256 hashPrev;
 
     CDiskBlockIndex()
     {
-        m_resident_payload = new BlockIndexResidentPayload();
+        m_resident_payload = &m_disk_payload;
         hashPrev = uint256();
     }
 
     explicit CDiskBlockIndex(const CBlockIndex* pindex) : CBlockIndex(*pindex), m_has_persisted_chainwork{true}
     {
+        if (m_resident_payload) {
+            m_disk_payload = *m_resident_payload;
+            m_disk_payload.algo_history = nullptr;
+            delete m_resident_payload;
+        }
+        m_resident_payload = &m_disk_payload;
+        m_payload_provider = nullptr;
         hashPrev = (pprev ? pprev->GetBlockHash() : uint256());
+    }
+
+    ~CDiskBlockIndex()
+    {
+        m_resident_payload = nullptr;
     }
 
     bool HasPersistedChainWork() const { return m_has_persisted_chainwork; }

@@ -2283,8 +2283,7 @@ bool BlockManager::LoadCompactBlockIndexPayload(
     payload.nUndoPos = entry->record.undo_pos;
     payload.hashMerkleRoot = entry->record.merkle_root;
     payload.nTimeMax = entry->record.time_max;
-    payload.last_algo_blocks.fill(nullptr);
-    payload.algo_history_valid = false;
+    payload.algo_history = nullptr;
     return true;
 }
 
@@ -2832,11 +2831,14 @@ bool BlockManager::WriteBlockIndexDB()
     // crash startup compares it against the canonical LevelDB graph and either
     // publishes or discards the complete batch.
     bool metadata_staged{false};
+    bool metadata_degraded{false};
     if (m_compact_block_delta_log && m_compact_block_delta_log->IsOpen()) {
         if (!StageCompactBlockIndexDeltaPending(vBlocks)) {
-            LogPrintf("Compact block index: disabling metadata delta after pending-batch failure; legacy block index remains authoritative\n");
+            LogPrintf("Compact block index: disabling future metadata writes after pending-batch failure; retaining verified backing for cache reads\n");
             ClearCompactBlockIndexDeltaPending();
-            InvalidateCompactBlockIndexDeltaOverlay();
+            m_compact_block_delta_log.reset();
+            m_block_index.DisablePayloadEviction();
+            metadata_degraded = true;
         } else {
             metadata_staged = fs::exists(CompactBlockIndexDeltaPendingPath());
         }
@@ -2864,11 +2866,11 @@ bool BlockManager::WriteBlockIndexDB()
     // The ordinary upstream block index is canonical. Only after its atomic
     // batch succeeds do we publish the staged compact records. If publication
     // fails, leave the pending batch intact so startup can finish the commit.
-    bool compact_metadata_published{!metadata_staged};
+    bool compact_metadata_published{!metadata_staged && !metadata_degraded};
     if (metadata_staged && !PublishCompactBlockIndexDeltaPending()) {
-        LogPrintf("Compact block index: disabling metadata delta after publish failure; pending batch retained for restart recovery\n");
+        LogPrintf("Compact block index: disabling future metadata writes after publish failure; retaining verified backing and disabling cache eviction\n");
         m_compact_block_delta_log.reset();
-        m_compact_block_delta.reset();
+        m_block_index.DisablePayloadEviction();
         compact_metadata_published = false;
     } else if (metadata_staged) {
         compact_metadata_published = true;
