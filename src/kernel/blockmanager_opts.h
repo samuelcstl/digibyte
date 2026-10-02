@@ -55,6 +55,8 @@ enum class BlockIndexCompactFaultMode {
 };
 
 static constexpr size_t DEFAULT_BLOCK_INDEX_HOT_DEPTH{40320};
+static constexpr size_t DEFAULT_BLOCK_INDEX_CACHE_MIB_BALANCED{512};
+static constexpr size_t DEFAULT_BLOCK_INDEX_CACHE_MIB_LOWMEM{128};
 
 /**
  * An options struct for `BlockManager`, more ergonomically referred to as
@@ -66,6 +68,7 @@ struct BlockManagerOpts {
     bool fast_prune{false};
     BlockIndexResidencyMode block_index_mode{BlockIndexResidencyMode::FULL};
     size_t block_index_hot_depth{DEFAULT_BLOCK_INDEX_HOT_DEPTH};
+    size_t block_index_cache_bytes{DEFAULT_BLOCK_INDEX_CACHE_MIB_BALANCED * 1024 * 1024};
     BlockIndexCompactShadowMode block_index_compact_shadow{BlockIndexCompactShadowMode::OFF};
     BlockIndexCompactLookupMode block_index_compact_lookup{BlockIndexCompactLookupMode::OFF};
     BlockIndexCompactIdsMode block_index_compact_ids{BlockIndexCompactIdsMode::OFF};

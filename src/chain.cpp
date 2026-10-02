@@ -16,17 +16,40 @@
  */
 CBlockIndex::CBlockIndex() = default;
 
-/**
- * CBlockIndex constructor that copies from a block header.
- * Residency-managed payloads are attached by BlockIndexStore.
- */
+CBlockIndex::CBlockIndex(const CBlockIndex& other)
+    : phashBlock(other.phashBlock),
+      pprev(other.pprev),
+      pskip(other.pskip),
+      nHeight(other.nHeight),
+      nChainWork(other.nChainWork),
+      nTx(other.nTx),
+      nChainTx(other.nChainTx),
+      nStatus(other.nStatus),
+      nVersion(other.nVersion),
+      nTime(other.nTime),
+      nBits(other.nBits),
+      nNonce(other.nNonce),
+      nSequenceId(other.nSequenceId),
+      m_compact_id(other.m_compact_id)
+{
+    if (other.m_resident_payload) {
+        m_resident_payload = new BlockIndexResidentPayload(*other.m_resident_payload);
+    }
+}
+
+CBlockIndex::~CBlockIndex()
+{
+    if (!m_payload_provider) delete m_resident_payload;
+}
+
 CBlockIndex::CBlockIndex(const CBlockHeader& block)
     : nVersion(block.nVersion),
-      hashMerkleRoot(block.hashMerkleRoot),
       nTime(block.nTime),
       nBits(block.nBits),
       nNonce(block.nNonce)
 {
+    m_resident_payload = new BlockIndexResidentPayload();
+    m_resident_payload->hashMerkleRoot = block.hashMerkleRoot;
 }
 std::string CBlockFileInfo::ToString() const
 {
@@ -36,7 +59,7 @@ std::string CBlockFileInfo::ToString() const
 std::string CBlockIndex::ToString() const
 {
     return strprintf("CBlockIndex(pprev=%p, nHeight=%d, merkle=%s, hashBlock=%s)",
-                     pprev, nHeight, hashMerkleRoot.ToString(), GetBlockHash().ToString());
+                     pprev, nHeight, MerkleRoot().ToString(), GetBlockHash().ToString());
 }
 
 void CChain::SetTip(CBlockIndex& block) {

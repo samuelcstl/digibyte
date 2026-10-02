@@ -37,8 +37,10 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, BlockManager::Op
             opts.block_index_mode = kernel::BlockIndexResidencyMode::FULL;
         } else if (*value == "balanced") {
             opts.block_index_mode = kernel::BlockIndexResidencyMode::BALANCED;
+            opts.block_index_cache_bytes = kernel::DEFAULT_BLOCK_INDEX_CACHE_MIB_BALANCED * 1024 * 1024;
         } else if (*value == "lowmem") {
             opts.block_index_mode = kernel::BlockIndexResidencyMode::LOWMEM;
+            opts.block_index_cache_bytes = kernel::DEFAULT_BLOCK_INDEX_CACHE_MIB_LOWMEM * 1024 * 1024;
         } else {
             return util::Error{strprintf(Untranslated("Invalid -blockindexmode=%s (expected full, balanced, or lowmem)"), *value)};
         }
@@ -49,6 +51,13 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, BlockManager::Op
             return util::Error{Untranslated("-blockindexhotdepth cannot be negative")};
         }
         opts.block_index_hot_depth = static_cast<size_t>(*value);
+    }
+
+    if (auto value{args.GetIntArg("-blockindexcache")}) {
+        if (*value < 0) {
+            return util::Error{Untranslated("-blockindexcache cannot be negative")};
+        }
+        opts.block_index_cache_bytes = static_cast<size_t>(*value) * 1024 * 1024;
     }
 
     if (auto value{args.GetArg("-blockindexcompactshadow")}) {

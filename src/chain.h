@@ -142,10 +142,25 @@ enum BlockStatus : uint32_t {
 };
 
 class CBlockIndex;
+struct BlockIndexResidentPayload;
+
+class BlockIndexPayloadProvider
+{
+public:
+    virtual ~BlockIndexPayloadProvider() = default;
+    virtual BlockIndexResidentPayload& MaterializeBlockIndexPayload(CBlockIndex& index) = 0;
+};
 
 struct BlockIndexResidentPayload
 {
+    int nFile{0};
+    unsigned int nDataPos{0};
+    unsigned int nUndoPos{0};
+    uint256 hashMerkleRoot{};
+    unsigned int nTimeMax{0};
+
     std::array<CBlockIndex*, NUM_ALGOS_IMPL> last_algo_blocks{};
+    bool algo_history_valid{false};
 };
 
 /** The block chain is a tree shaped structure starting with the
@@ -167,15 +182,6 @@ public:
 
     //! height of the entry in the chain. The genesis block has height 0
     int nHeight{0};
-
-    //! Which # file this block is stored in (blk?????.dat)
-    int nFile GUARDED_BY(::cs_main){0};
-
-    //! Byte offset within blk?????.dat where this block's data is stored
-    unsigned int nDataPos GUARDED_BY(::cs_main){0};
-
-    //! Byte offset within rev?????.dat where this block's undo data is stored
-    unsigned int nUndoPos GUARDED_BY(::cs_main){0};
 
     //! (memory only) Total amount of work (expected number of hashes) in the chain up to and including this block
     arith_uint256 nChainWork{};
@@ -207,16 +213,12 @@ public:
 
     //! block header
     int32_t nVersion{0};
-    uint256 hashMerkleRoot{};
     uint32_t nTime{0};
     uint32_t nBits{0};
     uint32_t nNonce{0};
 
     //! (memory only) Sequential id assigned to distinguish order in which blocks are received.
     int32_t nSequenceId{0};
-
-    //! (memory only) Maximum nTime in the chain up to and including this block.
-    unsigned int nTimeMax{0};
 
     /**
      * Generation-2 compact-store id.
@@ -229,21 +231,47 @@ public:
     uint32_t m_compact_id{std::numeric_limits<uint32_t>::max()};
 
     /**
-     * Optional residency-managed payload. BlockIndexStore owns this object.
-     * Cold historical block indexes intentionally leave it null.
+     * Residency-managed payload and provider. Store-managed indexes are backed
+     * by BlockIndexStore; standalone indexes own their payload directly.
      */
-    BlockIndexResidentPayload* m_resident_payload{nullptr};
+    mutable BlockIndexResidentPayload* m_resident_payload{nullptr};
+    BlockIndexPayloadProvider* m_payload_provider{nullptr};
 
+    void SetPayloadProvider(BlockIndexPayloadProvider* provider) noexcept { m_payload_provider = provider; }
+    void AttachResidentPayload(BlockIndexResidentPayload* payload) const noexcept { m_resident_payload = payload; }
+    void ClearResidentPayload() const noexcept { m_resident_payload = nullptr; }
+
+    [[nodiscard]] BlockIndexResidentPayload& ResidentPayload() const
+    {
+        if (!m_resident_payload) {
+            assert(m_payload_provider != nullptr);
+            m_resident_payload = &m_payload_provider->MaterializeBlockIndexPayload(
+                *const_cast<CBlockIndex*>(this));
+        }
+        return *m_resident_payload;
+    }
+
+    [[nodiscard]] bool HasResidentPayload() const noexcept { return m_resident_payload != nullptr; }
     [[nodiscard]] bool HasResidentAlgoHistory() const noexcept
     {
-        return m_resident_payload != nullptr;
+        return m_resident_payload && m_resident_payload->algo_history_valid;
     }
-
     [[nodiscard]] CBlockIndex* GetResidentLastAlgoBlock(int algo) const noexcept
     {
-        if (!m_resident_payload || algo < 0 || algo >= NUM_ALGOS_IMPL) return nullptr;
+        if (!HasResidentAlgoHistory() || algo < 0 || algo >= NUM_ALGOS_IMPL) return nullptr;
         return m_resident_payload->last_algo_blocks[algo];
     }
+
+    int& StorageFile() { return ResidentPayload().nFile; }
+    const int& StorageFile() const { return ResidentPayload().nFile; }
+    unsigned int& DataPos() { return ResidentPayload().nDataPos; }
+    const unsigned int& DataPos() const { return ResidentPayload().nDataPos; }
+    unsigned int& UndoPos() { return ResidentPayload().nUndoPos; }
+    const unsigned int& UndoPos() const { return ResidentPayload().nUndoPos; }
+    uint256& MerkleRoot() { return ResidentPayload().hashMerkleRoot; }
+    const uint256& MerkleRoot() const { return ResidentPayload().hashMerkleRoot; }
+    unsigned int& TimeMax() { return ResidentPayload().nTimeMax; }
+    const unsigned int& TimeMax() const { return ResidentPayload().nTimeMax; }
 
     /**
      * Full constructor that copies fields from a block header.
@@ -256,8 +284,8 @@ public:
         AssertLockHeld(::cs_main);
         FlatFilePos ret;
         if (nStatus & BLOCK_HAVE_DATA) {
-            ret.nFile = nFile;
-            ret.nPos = nDataPos;
+            ret.nFile = StorageFile();
+            ret.nPos = DataPos();
         }
         return ret;
     }
@@ -267,8 +295,8 @@ public:
         AssertLockHeld(::cs_main);
         FlatFilePos ret;
         if (nStatus & BLOCK_HAVE_UNDO) {
-            ret.nFile = nFile;
-            ret.nPos = nUndoPos;
+            ret.nFile = StorageFile();
+            ret.nPos = UndoPos();
         }
         return ret;
     }
@@ -279,7 +307,7 @@ public:
         block.nVersion = nVersion;
         if (pprev)
             block.hashPrevBlock = pprev->GetBlockHash();
-        block.hashMerkleRoot = hashMerkleRoot;
+        block.hashMerkleRoot = MerkleRoot();
         block.nTime = nTime;
         block.nBits = nBits;
         block.nNonce = nNonce;
@@ -328,7 +356,7 @@ public:
 
     int64_t GetBlockTimeMax() const
     {
-        return (int64_t)nTimeMax;
+        return (int64_t)TimeMax();
     }
 
     static constexpr int nMedianTimeSpan = 11;
@@ -398,7 +426,7 @@ public:
     const CBlockIndex* GetAncestor(int height) const;
 
     CBlockIndex();
-    ~CBlockIndex() = default;
+    ~CBlockIndex();
 
 protected:
     //! CBlockIndex should not allow public copy construction because equality
@@ -410,7 +438,7 @@ protected:
     //!
     //! We declare these protected instead of simply deleting them so that
     //! CDiskBlockIndex can reuse copy construction.
-    CBlockIndex(const CBlockIndex&) = default;
+    CBlockIndex(const CBlockIndex&);
     CBlockIndex& operator=(const CBlockIndex&) = delete;
     CBlockIndex(CBlockIndex&&) = delete;
     CBlockIndex& operator=(CBlockIndex&&) = delete;
@@ -466,14 +494,14 @@ public:
         READWRITE(VARINT_MODE(obj.nHeight, VarIntMode::NONNEGATIVE_SIGNED));
         READWRITE(VARINT(obj.nStatus));
         READWRITE(VARINT(obj.nTx));
-        if (obj.nStatus & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO)) READWRITE(VARINT_MODE(obj.nFile, VarIntMode::NONNEGATIVE_SIGNED));
-        if (obj.nStatus & BLOCK_HAVE_DATA) READWRITE(VARINT(obj.nDataPos));
-        if (obj.nStatus & BLOCK_HAVE_UNDO) READWRITE(VARINT(obj.nUndoPos));
+        if (obj.nStatus & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO)) READWRITE(VARINT_MODE(obj.StorageFile(), VarIntMode::NONNEGATIVE_SIGNED));
+        if (obj.nStatus & BLOCK_HAVE_DATA) READWRITE(VARINT(obj.DataPos()));
+        if (obj.nStatus & BLOCK_HAVE_UNDO) READWRITE(VARINT(obj.UndoPos()));
 
         // block header
         READWRITE(obj.nVersion);
         READWRITE(obj.hashPrev);
-        READWRITE(obj.hashMerkleRoot);
+        READWRITE(obj.MerkleRoot());
         READWRITE(obj.nTime);
         READWRITE(obj.nBits);
         READWRITE(obj.nNonce);
@@ -497,7 +525,7 @@ public:
         CBlockHeader block;
         block.nVersion = nVersion;
         block.hashPrevBlock = hashPrev;
-        block.hashMerkleRoot = hashMerkleRoot;
+        block.hashMerkleRoot = MerkleRoot();
         block.nTime = nTime;
         block.nBits = nBits;
         block.nNonce = nNonce;

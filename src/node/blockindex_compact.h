@@ -69,19 +69,19 @@ struct CompactBlockIndexRecord
         record.parent = parent_id;
         record.skip = skip_id;
         record.height = index.nHeight;
-        record.file = index.nFile;
-        record.data_pos = index.nDataPos;
-        record.undo_pos = index.nUndoPos;
+        record.file = index.StorageFile();
+        record.data_pos = index.DataPos();
+        record.undo_pos = index.UndoPos();
         record.chain_work = ArithToUint256(index.nChainWork);
         record.tx_count = index.nTx;
         record.chain_tx_count = index.nChainTx;
         record.status = index.nStatus;
         record.version = index.nVersion;
-        record.merkle_root = index.hashMerkleRoot;
+        record.merkle_root = index.MerkleRoot();
         record.time = index.nTime;
         record.bits = index.nBits;
         record.nonce = index.nNonce;
-        record.time_max = index.nTimeMax;
+        record.time_max = index.TimeMax();
         return record;
     }
 
@@ -93,19 +93,19 @@ struct CompactBlockIndexRecord
         return parent == parent_id &&
                skip == skip_id &&
                height == index.nHeight &&
-               file == index.nFile &&
-               data_pos == index.nDataPos &&
-               undo_pos == index.nUndoPos &&
+               file == index.StorageFile() &&
+               data_pos == index.DataPos() &&
+               undo_pos == index.UndoPos() &&
                chain_work == ArithToUint256(index.nChainWork) &&
                tx_count == index.nTx &&
                chain_tx_count == index.nChainTx &&
                status == index.nStatus &&
                version == index.nVersion &&
-               merkle_root == index.hashMerkleRoot &&
+               merkle_root == index.MerkleRoot() &&
                time == index.nTime &&
                bits == index.nBits &&
                nonce == index.nNonce &&
-               time_max == index.nTimeMax;
+               time_max == index.TimeMax();
     }
 };
 

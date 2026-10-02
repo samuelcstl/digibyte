@@ -28,6 +28,7 @@
 #include <deque>
 #include <functional>
 #include <limits>
+#include <list>
 #include <map>
 #include <memory>
 #include <set>
@@ -102,6 +103,10 @@ struct BlockIndexResidencyStats {
     uint64_t no_io_scopes{0};
     uint64_t backing_reads{0};
     uint64_t no_io_violations{0};
+    uint64_t payload_cache_hits{0};
+    uint64_t payload_cache_misses{0};
+    uint64_t payload_cache_evictions{0};
+    uint64_t payloads_created{0};
     uint64_t algo_payloads_created{0};
     uint64_t algo_prewarm_blocks{0};
 };
@@ -116,13 +121,16 @@ struct BlockIndexResidencyStats {
  *
  * All access is currently protected by cs_main through BlockManager.
  */
-class BlockIndexStore
+class BlockIndexStore : public BlockIndexPayloadProvider
 {
 public:
+    using PayloadLoader = std::function<bool(const CBlockIndex&, BlockIndexResidentPayload&)>;
+
     explicit BlockIndexStore(
         BlockIndexResidencyMode mode = BlockIndexResidencyMode::FULL,
-        size_t hot_depth = kernel::DEFAULT_BLOCK_INDEX_HOT_DEPTH)
-        : m_mode{mode}, m_hot_depth{hot_depth}
+        size_t hot_depth = kernel::DEFAULT_BLOCK_INDEX_HOT_DEPTH,
+        size_t cache_bytes = kernel::DEFAULT_BLOCK_INDEX_CACHE_MIB_BALANCED * 1024 * 1024)
+        : m_mode{mode}, m_hot_depth{hot_depth}, m_cache_limit_bytes{cache_bytes}
     {
     }
 
@@ -187,11 +195,29 @@ public:
         return found ? 1 : 0;
     }
 
-    template <typename... Args>
-    std::pair<iterator, bool> try_emplace(const uint256& hash, Args&&... args)
+    std::pair<iterator, bool> try_emplace(const uint256& hash)
     {
-        auto result{m_entries.try_emplace(hash, std::forward<Args>(args)...)};
-        if (result.second) ++m_stats.insertions;
+        auto result{m_entries.try_emplace(hash)};
+        if (result.second) {
+            ++m_stats.insertions;
+            InitializeStoreEntry(result.first->second);
+        }
+        return result;
+    }
+
+    std::pair<iterator, bool> try_emplace(const uint256& hash, const CBlockHeader& block)
+    {
+        auto result{m_entries.try_emplace(hash)};
+        if (result.second) {
+            ++m_stats.insertions;
+            CBlockIndex& index{result.first->second};
+            InitializeStoreEntry(index);
+            index.nVersion = block.nVersion;
+            index.nTime = block.nTime;
+            index.nBits = block.nBits;
+            index.nNonce = block.nNonce;
+            MaterializeBlockIndexPayload(index).hashMerkleRoot = block.hashMerkleRoot;
+        }
         return result;
     }
 
@@ -201,6 +227,7 @@ public:
         if (inserted) {
             ++m_stats.insertions;
             NoteLookup(false);
+            InitializeStoreEntry(it->second);
         } else {
             NoteLookup(true);
         }
@@ -213,7 +240,15 @@ public:
     [[nodiscard]] BlockIndexResidencyMode GetMode() const noexcept { return m_mode; }
     [[nodiscard]] size_t GetHotDepth() const noexcept { return m_hot_depth; }
     [[nodiscard]] BlockIndexResidencyStats GetResidencyStats() const noexcept { return m_stats; }
-    [[nodiscard]] size_t ResidentAlgoPayloads() const noexcept { return m_algo_payloads.size(); }
+    [[nodiscard]] size_t ResidentPayloads() const noexcept
+    {
+        return m_bootstrap_payloads.size() + m_pinned_payloads.size() + m_payload_cache_lru.size();
+    }
+    [[nodiscard]] uint64_t ResidentPayloadBytes() const noexcept
+    {
+        return static_cast<uint64_t>(ResidentPayloads()) * sizeof(BlockIndexResidentPayload);
+    }
+    [[nodiscard]] size_t CacheLimitBytes() const noexcept { return m_cache_limit_bytes; }
 
     static const char* ModeName(BlockIndexResidencyMode mode) noexcept
     {
@@ -225,25 +260,100 @@ public:
         return "unknown";
     }
 
+    BlockIndexResidentPayload& MaterializeBlockIndexPayload(CBlockIndex& index) override
+    {
+        if (index.m_resident_payload) {
+            const auto cached{m_payload_cache_index.find(&index)};
+            if (cached != m_payload_cache_index.end()) {
+                m_payload_cache_lru.splice(m_payload_cache_lru.begin(), m_payload_cache_lru, cached->second);
+            }
+            ++m_stats.payload_cache_hits;
+            return *index.m_resident_payload;
+        }
+
+        ++m_stats.payload_cache_misses;
+        if (!m_cache_active) {
+            m_bootstrap_payloads.emplace_back();
+            auto& payload{m_bootstrap_payloads.back()};
+            index.AttachResidentPayload(&payload);
+            ++m_stats.payloads_created;
+            return payload;
+        }
+
+        if (!m_payload_loader) throw std::runtime_error("block-index payload loader unavailable");
+        RecordBackingRead();
+
+        BlockIndexResidentPayload payload;
+        if (!m_payload_loader(index, payload)) {
+            throw std::runtime_error("block-index payload materialization failed");
+        }
+
+        const size_t payload_size{sizeof(BlockIndexResidentPayload)};
+        const size_t pinned_bytes{m_pinned_payloads.size() * payload_size};
+        const size_t discretionary_budget{m_cache_limit_bytes > pinned_bytes ? m_cache_limit_bytes - pinned_bytes : 0};
+        const size_t max_cached{std::max<size_t>(1, discretionary_budget / payload_size)};
+
+        while (m_payload_cache_lru.size() >= max_cached) {
+            auto victim{std::prev(m_payload_cache_lru.end())};
+            victim->index->ClearResidentPayload();
+            m_payload_cache_index.erase(victim->index);
+            m_payload_cache_lru.erase(victim);
+            ++m_stats.payload_cache_evictions;
+        }
+
+        m_payload_cache_lru.push_front(CacheEntry{&index, std::move(payload)});
+        auto inserted{m_payload_cache_index.emplace(&index, m_payload_cache_lru.begin())};
+        assert(inserted.second);
+        index.AttachResidentPayload(&m_payload_cache_lru.begin()->payload);
+        ++m_stats.payloads_created;
+        return m_payload_cache_lru.begin()->payload;
+    }
+
     BlockIndexResidentPayload& EnsureAlgoHistory(CBlockIndex& index)
     {
-        if (index.m_resident_payload) return *index.m_resident_payload;
+        auto& payload{MaterializeBlockIndexPayload(index)};
+        if (payload.algo_history_valid) return payload;
 
-        m_algo_payloads.emplace_back();
-        BlockIndexResidentPayload& payload{m_algo_payloads.back()};
-
-        if (index.pprev && index.pprev->m_resident_payload) {
+        if (index.pprev && index.pprev->HasResidentAlgoHistory()) {
             payload.last_algo_blocks = index.pprev->m_resident_payload->last_algo_blocks;
+        } else {
+            payload.last_algo_blocks.fill(nullptr);
         }
-
         const int algo{index.GetAlgo()};
-        if (algo >= 0 && algo < NUM_ALGOS_IMPL) {
-            payload.last_algo_blocks[algo] = &index;
-        }
-
-        index.m_resident_payload = &payload;
+        if (algo >= 0 && algo < NUM_ALGOS_IMPL) payload.last_algo_blocks[algo] = &index;
+        payload.algo_history_valid = true;
         ++m_stats.algo_payloads_created;
         return payload;
+    }
+
+    bool ActivatePayloadCache(CBlockIndex* tip, PayloadLoader loader)
+    {
+        if (m_mode == BlockIndexResidencyMode::FULL) {
+            m_payload_loader = std::move(loader);
+            return true;
+        }
+        if (!tip || !loader) return false;
+
+        std::vector<std::pair<CBlockIndex*, BlockIndexResidentPayload>> hot;
+        hot.reserve(std::min<size_t>(m_hot_depth, static_cast<size_t>(tip->nHeight) + 1));
+        for (CBlockIndex* index{tip}; index && hot.size() < m_hot_depth; index = index->pprev) {
+            if (!index->m_resident_payload) return false;
+            hot.emplace_back(index, *index->m_resident_payload);
+        }
+
+        for (auto& [_, index] : m_entries) index.ClearResidentPayload();
+        std::deque<BlockIndexResidentPayload>{}.swap(m_bootstrap_payloads);
+        m_pinned_payloads.clear();
+        m_payload_cache_lru.clear();
+        m_payload_cache_index.clear();
+        m_payload_loader = std::move(loader);
+        m_cache_active = true;
+
+        for (auto it = hot.rbegin(); it != hot.rend(); ++it) {
+            m_pinned_payloads.push_back(std::move(it->second));
+            it->first->AttachResidentPayload(&m_pinned_payloads.back());
+        }
+        return true;
     }
 
     size_t PrewarmAlgoHistory(CBlockIndex* tip)
@@ -289,6 +399,17 @@ public:
     }
 
 private:
+    struct CacheEntry {
+        CBlockIndex* index{nullptr};
+        BlockIndexResidentPayload payload{};
+    };
+
+    void InitializeStoreEntry(CBlockIndex& index)
+    {
+        index.SetPayloadProvider(this);
+        MaterializeBlockIndexPayload(index);
+    }
+
     void NoteLookup(bool hit) const noexcept
     {
         ++m_stats.lookups;
@@ -302,7 +423,15 @@ private:
     BlockMap m_entries;
     BlockIndexResidencyMode m_mode{BlockIndexResidencyMode::FULL};
     size_t m_hot_depth{kernel::DEFAULT_BLOCK_INDEX_HOT_DEPTH};
-    std::deque<BlockIndexResidentPayload> m_algo_payloads;
+    size_t m_cache_limit_bytes{kernel::DEFAULT_BLOCK_INDEX_CACHE_MIB_BALANCED * 1024 * 1024};
+
+    std::deque<BlockIndexResidentPayload> m_bootstrap_payloads;
+    std::deque<BlockIndexResidentPayload> m_pinned_payloads;
+    std::list<CacheEntry> m_payload_cache_lru;
+    std::unordered_map<CBlockIndex*, std::list<CacheEntry>::iterator> m_payload_cache_index;
+    PayloadLoader m_payload_loader;
+    bool m_cache_active{false};
+
     mutable BlockIndexResidencyStats m_stats;
     uint32_t m_no_io_depth{0};
 };
@@ -421,6 +550,8 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     BlockIndexId AllocateCompactId()
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool LoadCompactBlockIndexPayload(const CBlockIndex& index, BlockIndexResidentPayload& payload)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Return false if block file or undo file flushing fails. */
     [[nodiscard]] bool FlushBlockFile(int blockfile_num, bool fFinalize, bool finalize_undo);
@@ -528,7 +659,7 @@ public:
         : m_prune_mode{opts.prune_target > 0},
           m_opts{std::move(opts)},
           m_interrupt{interrupt},
-          m_block_index{m_opts.block_index_mode, m_opts.block_index_hot_depth} {};
+          m_block_index{m_opts.block_index_mode, m_opts.block_index_hot_depth, m_opts.block_index_cache_bytes} {};
 
     const util::SignalInterrupt& m_interrupt;
     std::atomic<bool> m_importing{false};
@@ -540,6 +671,7 @@ public:
     std::unique_ptr<CompactBlockIndexDelta> m_compact_block_delta GUARDED_BY(cs_main);
     std::unique_ptr<CompactBlockIndexDeltaLog> m_compact_block_delta_log GUARDED_BY(cs_main);
     std::unique_ptr<CompactBlockIndexDeltaState> m_compact_block_delta_state GUARDED_BY(cs_main);
+    std::unordered_map<BlockIndexId, CompactBlockIndexEntry> m_compact_block_delta_overlay GUARDED_BY(cs_main);
 
     // Next process-local compact id. Startup restores/assigns the historical
     // namespace, while clean IBD/reindex naturally starts at zero.
@@ -561,6 +693,7 @@ public:
 
     std::vector<CBlockIndex*> GetAllBlockIndices() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     std::vector<CBlockIndex*> GetAllBlockIndicesByCompactId() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool ActivateBlockIndexPayloadCache(CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
      * All pairs A->B, where A (or one of its ancestors) misses transactions, but B has transactions.
