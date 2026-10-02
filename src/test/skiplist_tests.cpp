@@ -110,20 +110,20 @@ BOOST_AUTO_TEST_CASE(findearliestatleast_test)
         vBlocksMain[i].BuildSkip();
         if (i < 10) {
             vBlocksMain[i].nTime = i;
-            vBlocksMain[i].nTimeMax = i;
+            vBlocksMain[i].TimeMax() = i;
         } else {
             // randomly choose something in the range [MTP, MTP*2]
             int64_t medianTimePast = vBlocksMain[i].GetMedianTimePast();
             int r{int(InsecureRandRange(medianTimePast))};
             vBlocksMain[i].nTime = uint32_t(r + medianTimePast);
-            vBlocksMain[i].nTimeMax = std::max(vBlocksMain[i].nTime, vBlocksMain[i-1].nTimeMax);
+            vBlocksMain[i].TimeMax() = std::max(vBlocksMain[i].nTime, vBlocksMain[i-1].TimeMax());
         }
     }
     // Check that we set nTimeMax up correctly.
     unsigned int curTimeMax = 0;
     for (unsigned int i=0; i<vBlocksMain.size(); ++i) {
         curTimeMax = std::max(curTimeMax, vBlocksMain[i].nTime);
-        BOOST_CHECK(curTimeMax == vBlocksMain[i].nTimeMax);
+        BOOST_CHECK(curTimeMax == vBlocksMain[i].TimeMax());
     }
 
     // Build a CChain for the main branch.
@@ -136,8 +136,8 @@ BOOST_AUTO_TEST_CASE(findearliestatleast_test)
         int r = InsecureRandRange(vBlocksMain.size());
         int64_t test_time = vBlocksMain[r].nTime;
         CBlockIndex* ret = chain.FindEarliestAtLeast(test_time, 0);
-        BOOST_CHECK(ret->nTimeMax >= test_time);
-        BOOST_CHECK((ret->pprev==nullptr) || ret->pprev->nTimeMax < test_time);
+        BOOST_CHECK(ret->TimeMax() >= test_time);
+        BOOST_CHECK((ret->pprev==nullptr) || ret->pprev->TimeMax() < test_time);
         BOOST_CHECK(vBlocksMain[r].GetAncestor(ret->nHeight) == ret);
     }
 }
@@ -151,7 +151,7 @@ BOOST_AUTO_TEST_CASE(findearliestatleast_edge_test)
         blocks.back().nHeight = prev ? prev->nHeight + 1 : 0;
         blocks.back().pprev = prev;
         blocks.back().BuildSkip();
-        blocks.back().nTimeMax = timeMax;
+        blocks.back().TimeMax() = timeMax;
     }
 
     CChain chain;
@@ -181,10 +181,10 @@ BOOST_AUTO_TEST_CASE(findearliestatleast_edge_test)
     BOOST_CHECK(!chain.FindEarliestAtLeast(0, 9));
 
     CBlockIndex* ret1 = chain.FindEarliestAtLeast(100, 2);
-    BOOST_CHECK(ret1->nTimeMax >= 100 && ret1->nHeight == 2);
+    BOOST_CHECK(ret1->TimeMax() >= 100 && ret1->nHeight == 2);
     BOOST_CHECK(!chain.FindEarliestAtLeast(300, 9));
     CBlockIndex* ret2 = chain.FindEarliestAtLeast(200, 4);
-    BOOST_CHECK(ret2->nTimeMax >= 200 && ret2->nHeight == 4);
+    BOOST_CHECK(ret2->TimeMax() >= 200 && ret2->nHeight == 4);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -244,9 +244,16 @@ public:
     [[nodiscard]] BlockIndexResidentPayload& ResidentPayload() const
     {
         if (!m_resident_payload) {
-            assert(m_payload_provider != nullptr);
-            m_resident_payload = &m_payload_provider->MaterializeBlockIndexPayload(
-                *const_cast<CBlockIndex*>(this));
+            if (m_payload_provider) {
+                m_resident_payload = &m_payload_provider->MaterializeBlockIndexPayload(
+                    *const_cast<CBlockIndex*>(this));
+            } else {
+                // Standalone/transient CBlockIndex objects used outside
+                // BlockIndexStore lazily own their payload. Store-managed
+                // entries install a provider before first payload access, so
+                // the production bootstrap path avoids per-entry heap churn.
+                m_resident_payload = new BlockIndexResidentPayload();
+            }
         }
         return *m_resident_payload;
     }
