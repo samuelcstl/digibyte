@@ -301,6 +301,104 @@ BOOST_AUTO_TEST_CASE(compact_block_index_metadata_pending_batch)
     BOOST_CHECK(published[1].entry.hash == uint256S("bbbb"));
 }
 
+BOOST_AUTO_TEST_CASE(compact_block_index_metadata_delta_compaction_publish)
+{
+    const fs::path delta_base{m_path_root / "compact-index-delta-publish"};
+    const fs::path log_base{m_path_root / "compact-index-delta-publish.log"};
+    const fs::path state_path{m_path_root / "compact-index-delta-publish.state"};
+    const uint256 genesis{Params().GetConsensus().hashGenesisBlock};
+    std::string error;
+
+    const auto slot_a{node::CompactBlockIndexDeltaSlot::A};
+    const auto slot_b{node::CompactBlockIndexDeltaSlot::B};
+
+    std::vector<node::CompactBlockIndexEntry> initial(2);
+    initial[0].hash = uint256S("10");
+    initial[0].record.height = 100;
+    initial[1].hash = uint256S("11");
+    initial[1].record.height = 101;
+
+    const fs::path delta_a{node::CompactBlockIndexDeltaState::SlotPath(delta_base, slot_a)};
+    const fs::path log_a{node::CompactBlockIndexDeltaState::SlotPath(log_base, slot_a)};
+    BOOST_REQUIRE_MESSAGE(node::CompactBlockIndexDelta::Build(delta_a, 7, 10, genesis, initial, error), error);
+    BOOST_REQUIRE_MESSAGE(node::CompactBlockIndexDeltaLog::Create(log_a, 7, 10, 2, genesis, error), error);
+
+    node::CompactBlockIndexDeltaLog source_log;
+    BOOST_REQUIRE_MESSAGE(source_log.Open(log_a, 7, 10, 2, genesis, error), error);
+
+    std::vector<node::CompactBlockIndexDeltaLogRecord> updates(4);
+    updates[0].id = 2;
+    updates[0].entry.hash = uint256S("02");
+    updates[0].entry.record.height = 2;
+    updates[0].entry.record.status = BLOCK_VALID_TREE;
+    updates[1].id = 11;
+    updates[1].entry.hash = uint256S("11");
+    updates[1].entry.record.height = 101;
+    updates[1].entry.record.status = BLOCK_VALID_CHAIN;
+    updates[2].id = 12;
+    updates[2].entry.hash = uint256S("12");
+    updates[2].entry.record.height = 102;
+    updates[3] = updates[2];
+    updates[3].entry.record.status = BLOCK_VALID_SCRIPTS;
+    BOOST_REQUIRE_MESSAGE(source_log.Append(updates, error), error);
+
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexDeltaState::Publish(
+            state_path, slot_a, 1, 7, 10, 2, genesis, error),
+        error);
+
+    node::CompactBlockIndexDelta source_delta;
+    BOOST_REQUIRE_MESSAGE(source_delta.Open(delta_a, 7, 10, genesis, error), error);
+
+    node::CompactBlockIndexDeltaCompaction plan;
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexDelta::PlanCompaction(
+            source_delta, source_log, 13, plan, error),
+        error);
+
+    BOOST_REQUIRE_EQUAL(plan.tail_entries.size(), 3U);
+    BOOST_REQUIRE_EQUAL(plan.base_updates.size(), 1U);
+
+    const fs::path delta_b{node::CompactBlockIndexDeltaState::SlotPath(delta_base, slot_b)};
+    const fs::path log_b{node::CompactBlockIndexDeltaState::SlotPath(log_base, slot_b)};
+    BOOST_REQUIRE_MESSAGE(node::CompactBlockIndexDelta::Build(delta_b, 7, 10, genesis, plan.tail_entries, error), error);
+    BOOST_REQUIRE_MESSAGE(node::CompactBlockIndexDeltaLog::Create(log_b, 7, 10, 3, genesis, error), error);
+
+    node::CompactBlockIndexDeltaLog compacted_log;
+    BOOST_REQUIRE_MESSAGE(compacted_log.Open(log_b, 7, 10, 3, genesis, error), error);
+    BOOST_REQUIRE_MESSAGE(compacted_log.Append(plan.base_updates, error), error);
+
+    // Preparing B does not change authority.
+    node::CompactBlockIndexDeltaState state;
+    BOOST_REQUIRE_MESSAGE(state.Open(state_path, 7, 10, genesis, error), error);
+    BOOST_CHECK(state.ActiveSlot() == slot_a);
+
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexDeltaState::Publish(
+            state_path, slot_b, 2, 7, 10, 3, genesis, error),
+        error);
+    BOOST_REQUIRE_MESSAGE(state.Open(state_path, 7, 10, genesis, error), error);
+
+    BOOST_CHECK(state.ActiveSlot() == slot_b);
+    BOOST_CHECK_EQUAL(state.Sequence(), 2U);
+    BOOST_CHECK_EQUAL(state.SnapshotTailEntryCount(), 3U);
+
+    node::CompactBlockIndexDelta compacted_delta;
+    node::CompactBlockIndexDeltaLog reopened_log;
+    BOOST_REQUIRE_MESSAGE(compacted_delta.Open(delta_b, 7, 10, genesis, error), error);
+    BOOST_REQUIRE_MESSAGE(reopened_log.Open(log_b, 7, 10, 3, genesis, error), error);
+    BOOST_CHECK_EQUAL(reopened_log.RecordCount(), 1U);
+
+    node::CompactBlockIndexDeltaCompaction stable;
+    BOOST_REQUIRE_MESSAGE(
+        node::CompactBlockIndexDelta::PlanCompaction(
+            compacted_delta, reopened_log, 13, stable, error),
+        error);
+    BOOST_CHECK_EQUAL(stable.tail_entries.size(), 3U);
+    BOOST_CHECK_EQUAL(stable.base_updates.size(), 1U);
+    BOOST_CHECK_EQUAL(stable.base_updates[0].id, 2U);
+}
+
 BOOST_AUTO_TEST_CASE(compact_block_index_metadata_delta_legacy_migration)
 {
     const fs::path legacy_delta{m_path_root / "compact-index-delta-legacy"};

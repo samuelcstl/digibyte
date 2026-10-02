@@ -94,8 +94,10 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, BlockManager::Op
             opts.block_index_compact_delta = kernel::BlockIndexCompactDeltaMode::BUILD;
         } else if (*value == "verify") {
             opts.block_index_compact_delta = kernel::BlockIndexCompactDeltaMode::VERIFY;
+        } else if (*value == "compact") {
+            opts.block_index_compact_delta = kernel::BlockIndexCompactDeltaMode::COMPACT;
         } else {
-            return util::Error{strprintf(Untranslated("Invalid -blockindexcompactdelta=%s (expected off, build, or verify)"), *value)};
+            return util::Error{strprintf(Untranslated("Invalid -blockindexcompactdelta=%s (expected off, build, verify, or compact)"), *value)};
         }
     }
 
@@ -106,8 +108,12 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, BlockManager::Op
             opts.block_index_compact_fault = kernel::BlockIndexCompactFaultMode::AFTER_PENDING;
         } else if (*value == "after-leveldb") {
             opts.block_index_compact_fault = kernel::BlockIndexCompactFaultMode::AFTER_LEVELDB;
+        } else if (*value == "before-compaction-selector") {
+            opts.block_index_compact_fault = kernel::BlockIndexCompactFaultMode::BEFORE_COMPACTION_SELECTOR;
+        } else if (*value == "after-compaction-selector") {
+            opts.block_index_compact_fault = kernel::BlockIndexCompactFaultMode::AFTER_COMPACTION_SELECTOR;
         } else {
-            return util::Error{strprintf(Untranslated("Invalid -blockindexcompactfault=%s (expected off, after-pending, or after-leveldb)"), *value)};
+            return util::Error{strprintf(Untranslated("Invalid -blockindexcompactfault=%s (expected off, after-pending, after-leveldb, before-compaction-selector, or after-compaction-selector)"), *value)};
         }
     }
 

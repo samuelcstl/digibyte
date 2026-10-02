@@ -1526,6 +1526,194 @@ bool BlockManager::BuildCompactBlockIndexDelta(
     return true;
 }
 
+bool BlockManager::CompactBlockIndexDelta()
+{
+    AssertLockHeld(cs_main);
+
+    if (!m_compact_block_delta_state || !m_compact_block_delta_state->IsOpen() ||
+        !m_compact_block_delta || !m_compact_block_delta->IsOpen() ||
+        !m_compact_block_delta_log || !m_compact_block_delta_log->IsOpen()) {
+        LogPrintf("Compact block index: cannot compact metadata without an open selected pair\n");
+        return false;
+    }
+
+    const fs::path pending_path{CompactBlockIndexDeltaPendingPath()};
+    if (fs::exists(pending_path)) {
+        LogPrintf("Compact block index: refusing metadata compaction while pending batch exists\n");
+        return false;
+    }
+
+    CompactBlockIndexDeltaCompaction compacted;
+    std::string error;
+    if (!CompactBlockIndexDelta::PlanCompaction(
+            *m_compact_block_delta,
+            *m_compact_block_delta_log,
+            m_next_compact_id,
+            compacted,
+            error)) {
+        LogPrintf("Compact block index: metadata compaction planning failed: %s\n",
+                  error);
+        return false;
+    }
+
+    const auto start{SteadyClock::now()};
+    const auto old_slot{m_compact_block_delta_state->ActiveSlot()};
+    const auto target_slot{CompactBlockIndexDeltaState::OtherSlot(old_slot)};
+    const uint64_t sequence{m_compact_block_delta_state->Sequence() + 1};
+    const uint64_t base_generation{m_compact_block_delta->BaseGeneration()};
+    const uint64_t base_entry_count{m_compact_block_delta->BaseEntryCount()};
+    const uint64_t old_records{m_compact_block_delta_log->RecordCount()};
+
+    const fs::path delta_path{
+        CompactBlockIndexDeltaState::SlotPath(
+            CompactBlockIndexDeltaPath(), target_slot)};
+    const fs::path log_path{
+        CompactBlockIndexDeltaState::SlotPath(
+            CompactBlockIndexDeltaLogPath(), target_slot)};
+    const fs::path state_path{CompactBlockIndexDeltaStatePath()};
+
+    if (!CompactBlockIndexDelta::Build(
+            delta_path,
+            base_generation,
+            base_entry_count,
+            GetConsensus().hashGenesisBlock,
+            compacted.tail_entries,
+            error)) {
+        LogPrintf("Compact block index: failed building compacted metadata checkpoint %s: %s\n",
+                  fs::PathToString(delta_path), error);
+        return false;
+    }
+
+    if (!CompactBlockIndexDeltaLog::Create(
+            log_path,
+            base_generation,
+            base_entry_count,
+            compacted.tail_entries.size(),
+            GetConsensus().hashGenesisBlock,
+            error)) {
+        LogPrintf("Compact block index: failed creating compacted metadata log %s: %s\n",
+                  fs::PathToString(log_path), error);
+        return false;
+    }
+
+    CompactBlockIndexDeltaLog target_log;
+    if (!target_log.Open(
+            log_path,
+            base_generation,
+            base_entry_count,
+            compacted.tail_entries.size(),
+            GetConsensus().hashGenesisBlock,
+            error) ||
+        !target_log.Append(compacted.base_updates, error)) {
+        LogPrintf("Compact block index: failed writing compacted metadata base overlay: %s\n",
+                  error);
+        return false;
+    }
+
+    auto target_delta = std::make_unique<CompactBlockIndexDelta>();
+    auto verified_log = std::make_unique<CompactBlockIndexDeltaLog>();
+    if (!target_delta->Open(
+            delta_path,
+            base_generation,
+            base_entry_count,
+            GetConsensus().hashGenesisBlock,
+            error) ||
+        !verified_log->Open(
+            log_path,
+            base_generation,
+            base_entry_count,
+            compacted.tail_entries.size(),
+            GetConsensus().hashGenesisBlock,
+            error)) {
+        LogPrintf("Compact block index: compacted metadata pair failed reopen validation: %s\n",
+                  error);
+        return false;
+    }
+
+    if (target_delta->TailEntryCount() != compacted.tail_entries.size() ||
+        verified_log->RecordCount() != compacted.base_updates.size()) {
+        LogPrintf("Compact block index: compacted metadata pair cardinality mismatch\n");
+        return false;
+    }
+
+    CompactBlockIndexDeltaCompaction verify_plan;
+    error.clear();
+    if (!CompactBlockIndexDelta::PlanCompaction(
+            *target_delta,
+            *verified_log,
+            m_next_compact_id,
+            verify_plan,
+            error) ||
+        verify_plan.tail_entries.size() != compacted.tail_entries.size() ||
+        verify_plan.base_updates.size() != compacted.base_updates.size()) {
+        LogPrintf("Compact block index: compacted metadata pair self-verification failed: %s\n",
+                  error);
+        return false;
+    }
+
+    LogPrintf("Compact block index: prepared compacted metadata pair from_slot=%s to_slot=%s sequence=%u old_records=%u tail=%u base_updates=%u delta_bytes=%u log_bytes=%u\n",
+              old_slot == CompactBlockIndexDeltaSlot::A ? "A" : "B",
+              target_slot == CompactBlockIndexDeltaSlot::A ? "A" : "B",
+              sequence,
+              old_records,
+              target_delta->TailEntryCount(),
+              verified_log->RecordCount(),
+              target_delta->SizeBytes(),
+              verified_log->SizeBytes());
+
+    if (m_opts.block_index_compact_fault ==
+        kernel::BlockIndexCompactFaultMode::BEFORE_COMPACTION_SELECTOR) {
+        LogPrintf("Compact block index: fault injection before compaction selector publish; terminating with previous slot authoritative\n");
+        std::_Exit(87);
+    }
+
+    if (!CompactBlockIndexDeltaState::Publish(
+            state_path,
+            target_slot,
+            sequence,
+            base_generation,
+            base_entry_count,
+            compacted.tail_entries.size(),
+            GetConsensus().hashGenesisBlock,
+            error)) {
+        LogPrintf("Compact block index: failed publishing compacted metadata selector: %s\n",
+                  error);
+        return false;
+    }
+
+    if (m_opts.block_index_compact_fault ==
+        kernel::BlockIndexCompactFaultMode::AFTER_COMPACTION_SELECTOR) {
+        LogPrintf("Compact block index: fault injection after compaction selector publish; terminating with new slot authoritative\n");
+        std::_Exit(88);
+    }
+
+    auto state = std::make_unique<CompactBlockIndexDeltaState>();
+    if (!state->Open(
+            state_path,
+            base_generation,
+            base_entry_count,
+            GetConsensus().hashGenesisBlock,
+            error)) {
+        LogPrintf("Compact block index: compacted selector published but could not reopen it: %s\n",
+                  error);
+        return false;
+    }
+
+    LogPrintf("Compact block index: compacted metadata pair active slot=%s sequence=%u old_records=%u new_records=%u tail=%u base_updates=%u in %d ms\n",
+              target_slot == CompactBlockIndexDeltaSlot::A ? "A" : "B",
+              sequence,
+              old_records,
+              verified_log->RecordCount(),
+              target_delta->TailEntryCount(),
+              compacted.base_updates.size(),
+              Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
+
+    m_compact_block_delta_state = std::move(state);
+    m_compact_block_delta = std::move(target_delta);
+    m_compact_block_delta_log = std::move(verified_log);
+    return true;
+}
+
 bool BlockManager::VerifyCompactBlockIndexDelta()
 {
     AssertLockHeld(cs_main);
@@ -2453,6 +2641,16 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
     case kernel::BlockIndexCompactDeltaMode::VERIFY:
         if (!VerifyCompactBlockIndexDelta()) {
             LogPrintf("Compact block index: metadata delta verification failed; continuing without metadata delta\n");
+            m_compact_block_delta.reset();
+            m_compact_block_delta_log.reset();
+            m_compact_block_delta_state.reset();
+        }
+        break;
+    case kernel::BlockIndexCompactDeltaMode::COMPACT:
+        if (!VerifyCompactBlockIndexDelta() ||
+            !CompactBlockIndexDelta() ||
+            !VerifyCompactBlockIndexDelta()) {
+            LogPrintf("Compact block index: metadata compaction/verification failed; continuing without metadata delta\n");
             m_compact_block_delta.reset();
             m_compact_block_delta_log.reset();
             m_compact_block_delta_state.reset();

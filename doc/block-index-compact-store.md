@@ -470,20 +470,32 @@ base binding and checkpoint tail count. It deliberately does not pin the live
 log record count, because normal operation continues appending to the selected
 log.
 
-The selector is now wired into the runtime metadata lifecycle. Existing
-unslotted checkpoint/log files are migrated once by rebuilding and fsyncing an
-equivalent slot-A pair, validating it, and only then publishing the selector.
-The original unslotted files remain untouched during migration, so an
-interruption before selector publication simply retries from the legacy pair.
-Fresh build mode also writes a complete inactive slot and flips the selector
-only after both files reopen successfully.
+The selector is wired into the runtime metadata lifecycle. The first
+real-node migration gate passed: the legacy unslotted checkpoint and 1,649-
+record log were reproduced byte-for-byte in slot A, selector sequence 1 chose
+that pair, and full graph verification succeeded. After normal growth and a
+graceful flush, only the selected slot-A log grew (277,160 to 282,032 bytes,
+1,649 to 1,678 records); the legacy files remained byte-for-byte frozen. A
+restart reopened selector A and replayed all 1,678 records successfully.
 
-The next storage-lifecycle gate is wiring the compaction planner into inactive
-slot publication and fault-injecting the selector boundary, followed by
-lookup-tail maintenance and generation rollover. After those are proven, the
-next major phase is converting long-lived pointer owners to ids/leases so cold
-historical `CBlockIndex` objects can stop existing permanently in anonymous
-memory.
+Existing unslotted checkpoint/log files are migrated once by rebuilding and
+fsyncing an equivalent slot-A pair, validating it, and only then publishing
+the selector. The original unslotted files remain untouched during migration,
+so an interruption before selector publication simply retries from the legacy
+pair. Fresh build mode also writes a complete inactive slot and flips the
+selector only after both files reopen successfully.
+
+One-shot debug compaction is now available through
+`-blockindexcompactdelta=compact`. It verifies the selected source pair,
+folds all tail state into the inactive checkpoint, writes only deduplicated
+immutable-base updates to the inactive log, reopens and self-checks the pair,
+then atomically flips the selector and verifies the newly selected pair against
+the canonical graph. Fault points immediately before and after selector
+publication allow both crash outcomes to be validated deterministically.
+
+The next storage-lifecycle gate is that two-sided live compaction fault test.
+After it passes, bounded metadata compaction is complete and work moves to
+lookup-tail maintenance and generation rollover.
 
 ## Pointer-owner conversion and hot leases
 

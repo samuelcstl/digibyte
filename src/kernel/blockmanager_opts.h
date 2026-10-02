@@ -43,12 +43,15 @@ enum class BlockIndexCompactDeltaMode {
     OFF,
     BUILD,
     VERIFY,
+    COMPACT,
 };
 
 enum class BlockIndexCompactFaultMode {
     OFF,
     AFTER_PENDING,
     AFTER_LEVELDB,
+    BEFORE_COMPACTION_SELECTOR,
+    AFTER_COMPACTION_SELECTOR,
 };
 
 static constexpr size_t DEFAULT_BLOCK_INDEX_HOT_DEPTH{40320};
