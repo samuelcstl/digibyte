@@ -474,6 +474,7 @@ public:
 
     CDiskBlockIndex()
     {
+        m_resident_payload = new BlockIndexResidentPayload();
         hashPrev = uint256();
     }
 

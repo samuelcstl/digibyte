@@ -4520,9 +4520,9 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
     AssertLockHeld(cs_main);
     pindexNew->nTx = block.vtx.size();
     pindexNew->nChainTx = 0;
-    pindexNew->nFile = pos.nFile;
-    pindexNew->nDataPos = pos.nPos;
-    pindexNew->nUndoPos = 0;
+    pindexNew->StorageFile() = pos.nFile;
+    pindexNew->DataPos() = pos.nPos;
+    pindexNew->UndoPos() = 0;
     pindexNew->nStatus |= BLOCK_HAVE_DATA;
     if (DeploymentActiveAt(*pindexNew, *this, Consensus::DEPLOYMENT_SEGWIT)) {
         pindexNew->nStatus |= BLOCK_OPT_WITNESS;
@@ -5323,12 +5323,19 @@ bool Chainstate::LoadChainTip()
                   m_chain.CompactIdCount());
     }
 
+    m_blockman.ActivateBlockIndexPayloadCache(m_chain.Tip());
     const size_t algo_warmed{m_blockman.m_block_index.PrewarmAlgoHistory(m_chain.Tip())};
-    LogPrintf("Block-index residency: mode=%s hotdepth=%u algo_payloads=%u prewarmed=%u\n",
+    const node::BlockIndexResidencyStats residency{m_blockman.m_block_index.GetResidencyStats()};
+    LogPrintf("Block-index residency: mode=%s hotdepth=%u cache=%u MiB resident_payloads=%u resident_bytes=%u prewarmed=%u cache_hits=%u cache_misses=%u evictions=%u\n",
               node::BlockIndexStore::ModeName(m_blockman.m_block_index.GetMode()),
               m_blockman.m_block_index.GetHotDepth(),
-              m_blockman.m_block_index.ResidentAlgoPayloads(),
-              algo_warmed);
+              m_blockman.m_block_index.CacheLimitBytes() / (1024 * 1024),
+              m_blockman.m_block_index.ResidentPayloads(),
+              m_blockman.m_block_index.ResidentPayloadBytes(),
+              algo_warmed,
+              residency.payload_cache_hits,
+              residency.payload_cache_misses,
+              residency.payload_cache_evictions);
 
     PruneBlockIndexCandidates();
 

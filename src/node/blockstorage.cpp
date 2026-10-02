@@ -162,11 +162,11 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                 CBlockIndex* pindexNew = insertBlockIndex(diskindex.ConstructBlockHash());
                 pindexNew->pprev          = insertBlockIndex(diskindex.hashPrev);
                 pindexNew->nHeight        = diskindex.nHeight;
-                pindexNew->nFile          = diskindex.nFile;
-                pindexNew->nDataPos       = diskindex.nDataPos;
-                pindexNew->nUndoPos       = diskindex.nUndoPos;
+                pindexNew->StorageFile()  = diskindex.StorageFile();
+                pindexNew->DataPos()      = diskindex.DataPos();
+                pindexNew->UndoPos()      = diskindex.UndoPos();
                 pindexNew->nVersion       = diskindex.nVersion;
-                pindexNew->hashMerkleRoot = diskindex.hashMerkleRoot;
+                pindexNew->MerkleRoot()   = diskindex.MerkleRoot();
                 pindexNew->nTime          = diskindex.nTime;
                 pindexNew->nBits          = diskindex.nBits;
                 pindexNew->nNonce         = diskindex.nNonce;
@@ -1110,6 +1110,7 @@ void BlockManager::InvalidateCompactBlockIndexDeltaOverlay()
 
     m_compact_block_delta_log.reset();
     m_compact_block_delta.reset();
+    m_compact_block_delta_overlay.clear();
 
     fs::path path{CompactBlockIndexDeltaLogPath()};
     if (m_compact_block_delta_state && m_compact_block_delta_state->IsOpen()) {
@@ -1227,6 +1228,10 @@ bool BlockManager::PublishCompactBlockIndexDeltaPending()
         return false;
     }
 
+    for (const CompactBlockIndexDeltaLogRecord& update : updates) {
+        m_compact_block_delta_overlay[update.id] = update.entry;
+    }
+
     LogPrintf("Compact block index: published metadata pending batch count=%u records=%u bytes=%u\n",
               updates.size(),
               m_compact_block_delta_log->RecordCount(),
@@ -1302,6 +1307,9 @@ bool BlockManager::ReconcileCompactBlockIndexDeltaPending()
             LogPrintf("Compact block index: failed recovering committed metadata pending batch: %s\n",
                       error);
             return false;
+        }
+        for (const CompactBlockIndexDeltaLogRecord& update : updates) {
+            m_compact_block_delta_overlay[update.id] = update.entry;
         }
         LogPrintf("Compact block index: recovered committed metadata pending batch count=%u records=%u bytes=%u\n",
                   updates.size(),
@@ -1976,6 +1984,8 @@ bool BlockManager::VerifyCompactBlockIndexDelta()
         ++verified_updates;
     }
 
+    m_compact_block_delta_overlay = overlay;
+
     LogPrintf("Compact block index: verified metadata delta base=%u snapshot_tail=%u next=%u log_records=%u replayed=%u overlay=%u snapshot=%u updates=%u extensions=%u bytes=%u log_bytes=%u in %d ms\n",
               base_entry_count,
               snapshot_tail_count,
@@ -2246,6 +2256,74 @@ bool BlockManager::VerifyCompactBlockIndexLookup()
     return true;
 }
 
+bool BlockManager::LoadCompactBlockIndexPayload(
+    const CBlockIndex& index,
+    BlockIndexResidentPayload& payload)
+{
+    AssertLockHeld(cs_main);
+
+    const BlockIndexId id{index.m_compact_id};
+    if (id == INVALID_BLOCK_INDEX_ID) return false;
+
+    const CompactBlockIndexEntry* entry{nullptr};
+    const auto overlay{m_compact_block_delta_overlay.find(id)};
+    if (overlay != m_compact_block_delta_overlay.end()) {
+        entry = &overlay->second;
+    } else if (m_compact_block_index &&
+               static_cast<uint64_t>(id) < m_compact_block_index->EntryCount()) {
+        entry = m_compact_block_index->Get(id);
+    } else if (m_compact_block_delta && m_compact_block_delta->IsOpen()) {
+        entry = m_compact_block_delta->Get(id);
+    }
+
+    if (!entry || entry->hash != index.GetBlockHash()) return false;
+
+    payload.nFile = entry->record.file;
+    payload.nDataPos = entry->record.data_pos;
+    payload.nUndoPos = entry->record.undo_pos;
+    payload.hashMerkleRoot = entry->record.merkle_root;
+    payload.nTimeMax = entry->record.time_max;
+    payload.last_algo_blocks.fill(nullptr);
+    payload.algo_history_valid = false;
+    return true;
+}
+
+bool BlockManager::ActivateBlockIndexPayloadCache(CBlockIndex* tip)
+{
+    AssertLockHeld(cs_main);
+
+    if (m_block_index.GetMode() == BlockIndexResidencyMode::FULL) return true;
+
+    if (!m_compact_block_index ||
+        !m_compact_block_delta ||
+        !m_compact_block_delta->IsOpen()) {
+        LogPrintf("Block-index residency: compact backing unavailable; retaining eager payload residency\n");
+        return false;
+    }
+
+    const bool activated{m_block_index.ActivatePayloadCache(
+        tip,
+        [this](const CBlockIndex& index, BlockIndexResidentPayload& payload) {
+            AssertLockHeld(cs_main);
+            return LoadCompactBlockIndexPayload(index, payload);
+        })};
+
+    if (!activated) {
+        LogPrintf("Block-index residency: payload-cache activation failed; retaining eager payload residency\n");
+        return false;
+    }
+
+    LogPrintf("Block-index residency: activated payload cache mode=%s hotdepth=%u budget=%u MiB resident=%u bytes=%u shell=%u payload=%u\n",
+              BlockIndexStore::ModeName(m_block_index.GetMode()),
+              m_block_index.GetHotDepth(),
+              m_block_index.CacheLimitBytes() / (1024 * 1024),
+              m_block_index.ResidentPayloads(),
+              m_block_index.ResidentPayloadBytes(),
+              sizeof(CBlockIndex),
+              sizeof(BlockIndexResidentPayload));
+    return true;
+}
+
 CBlockIndex* BlockManager::LookupBlockIndex(const uint256& hash)
 {
     AssertLockHeld(cs_main);
@@ -2286,7 +2364,7 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     // A newly accepted header is live state. Keep its algorithm-history
     // accelerator resident in every mode so validation/mining never needs I/O.
     m_block_index.EnsureAlgoHistory(*pindexNew);
-    pindexNew->nTimeMax = (pindexNew->pprev ? std::max(pindexNew->pprev->nTimeMax, pindexNew->nTime) : pindexNew->nTime);
+    pindexNew->TimeMax() = (pindexNew->pprev ? std::max(pindexNew->pprev->TimeMax(), pindexNew->nTime) : pindexNew->nTime);
     pindexNew->nChainWork = (pindexNew->pprev ? pindexNew->pprev->nChainWork : 0) + GetBlockProof(*pindexNew);
     pindexNew->RaiseValidity(BLOCK_VALID_TREE);
     if (best_header == nullptr || best_header->nChainWork < pindexNew->nChainWork) {
@@ -2305,12 +2383,12 @@ void BlockManager::PruneOneBlockFile(const int fileNumber)
 
     for (auto& entry : m_block_index) {
         CBlockIndex* pindex = &entry.second;
-        if (pindex->nFile == fileNumber) {
+        if (pindex->StorageFile() == fileNumber) {
             pindex->nStatus &= ~BLOCK_HAVE_DATA;
             pindex->nStatus &= ~BLOCK_HAVE_UNDO;
-            pindex->nFile = 0;
-            pindex->nDataPos = 0;
-            pindex->nUndoPos = 0;
+            pindex->StorageFile() = 0;
+            pindex->DataPos() = 0;
+            pindex->UndoPos() = 0;
             m_dirty_blockindex.insert(pindex);
 
             // Prune from m_blocks_unlinked -- any block we prune would have
@@ -2455,9 +2533,10 @@ CBlockIndex* BlockManager::InsertBlockIndex(const uint256& hash)
 
 bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockhash)
 {
-    LogPrintf("Block-index residency: mode=%s hotdepth=%u shell=%u payload=%u\n",
+    LogPrintf("Block-index residency: mode=%s hotdepth=%u cache=%u MiB shell=%u payload=%u\n",
               BlockIndexStore::ModeName(m_block_index.GetMode()),
               m_block_index.GetHotDepth(),
+              m_block_index.CacheLimitBytes() / (1024 * 1024),
               sizeof(CBlockIndex),
               sizeof(BlockIndexResidentPayload));
 
@@ -2557,7 +2636,7 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
             chainwork_cache_migration.push_back(pindex);
         }
         const auto chainwork_end{SteadyClock::now()};
-        pindex->nTimeMax = (pindex->pprev ? std::max(pindex->pprev->nTimeMax, pindex->nTime) : pindex->nTime);
+        pindex->TimeMax() = (pindex->pprev ? std::max(pindex->pprev->TimeMax(), pindex->nTime) : pindex->nTime);
         const auto timemax_end{SteadyClock::now()};
 
         reconstruction_algo_time += algo_end - algo_start;
@@ -2818,7 +2897,7 @@ bool BlockManager::LoadBlockIndexDB(const std::optional<uint256>& snapshot_block
     std::set<int> setBlkDataFiles;
     for (const auto& [_, block_index] : m_block_index) {
         if (block_index.nStatus & BLOCK_HAVE_DATA) {
-            setBlkDataFiles.insert(block_index.nFile);
+            setBlkDataFiles.insert(block_index.StorageFile());
         }
     }
     for (std::set<int>::iterator it = setBlkDataFiles.begin(); it != setBlkDataFiles.end(); it++) {
@@ -3313,7 +3392,7 @@ bool BlockManager::WriteUndoDataForBlock(const CBlockUndo& blockundo, BlockValid
             cursor.undo_height = block.nHeight;
         }
         // update nUndoPos in block index
-        block.nUndoPos = _pos.nPos;
+        block.UndoPos() = _pos.nPos;
         block.nStatus |= BLOCK_HAVE_UNDO;
         m_dirty_blockindex.insert(&block);
     }

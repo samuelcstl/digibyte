@@ -19,8 +19,8 @@ interfaces::BlockInfo MakeBlockInfo(const CBlockIndex* index, const CBlock* data
         info.height = index->nHeight;
         info.chain_time_max = index->GetBlockTimeMax();
         LOCK(::cs_main);
-        info.file_number = index->nFile;
-        info.data_pos = index->nDataPos;
+        info.file_number = index->StorageFile();
+        info.data_pos = index->DataPos();
     }
     info.data = data;
     return info;
