@@ -32,8 +32,8 @@ CBlockIndex::CBlockIndex(const CBlockIndex& other)
       nSequenceId(other.nSequenceId),
       m_compact_id(other.m_compact_id)
 {
-    if (other.m_resident_payload) {
-        m_resident_payload = new BlockIndexResidentPayload(*other.m_resident_payload);
+    if (other.m_resident_payload || other.m_payload_provider) {
+        m_resident_payload = new BlockIndexResidentPayload(other.ResidentPayload());
     }
 }
 

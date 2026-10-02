@@ -851,6 +851,81 @@ BOOST_AUTO_TEST_CASE(compact_block_index_persistent_lookup)
     BOOST_CHECK(!lookup.FindResident(uint256S("deadbeef"), store).has_value());
 }
 
+BOOST_AUTO_TEST_CASE(block_index_store_payload_cache_indirection)
+{
+    const size_t budget{2 * sizeof(BlockIndexResidentPayload)};
+    BlockIndexStore store{
+        BlockIndexResidencyMode::LOWMEM,
+        /*hot_depth=*/1,
+        budget};
+
+    const uint256 hash_a{uint256S("01")};
+    const uint256 hash_b{uint256S("02")};
+    const uint256 hash_c{uint256S("03")};
+
+    auto [it_a, inserted_a] = store.try_emplace(hash_a);
+    auto [it_b, inserted_b] = store.try_emplace(hash_b);
+    auto [it_c, inserted_c] = store.try_emplace(hash_c);
+    BOOST_REQUIRE(inserted_a && inserted_b && inserted_c);
+
+    CBlockIndex& a{it_a->second};
+    CBlockIndex& b{it_b->second};
+    CBlockIndex& c{it_c->second};
+
+    a.m_compact_id = 0;
+    b.m_compact_id = 1;
+    c.m_compact_id = 2;
+    a.nHeight = 0;
+    b.nHeight = 1;
+    c.nHeight = 2;
+    b.pprev = &a;
+    c.pprev = &b;
+
+    a.StorageFile() = 10;
+    b.StorageFile() = 11;
+    c.StorageFile() = 12;
+    a.TimeMax() = 100;
+    b.TimeMax() = 101;
+    c.TimeMax() = 102;
+
+    std::array<BlockIndexResidentPayload, 3> backing{
+        a.ResidentPayload(),
+        b.ResidentPayload(),
+        c.ResidentPayload()};
+    size_t loads{0};
+
+    BOOST_REQUIRE(store.ActivatePayloadCache(
+        &c,
+        [&](const CBlockIndex& index, BlockIndexResidentPayload& payload) {
+            BOOST_REQUIRE(index.m_compact_id < backing.size());
+            payload = backing[index.m_compact_id];
+            ++loads;
+            return true;
+        }));
+
+    // Only the hot tip remains pinned after the bootstrap arena is released.
+    BOOST_CHECK_EQUAL(store.ResidentPayloads(), 1U);
+    BOOST_CHECK(c.HasResidentPayload());
+    BOOST_CHECK(!a.HasResidentPayload());
+    BOOST_CHECK(!b.HasResidentPayload());
+
+    BOOST_CHECK_EQUAL(a.StorageFile(), 10);
+    BOOST_CHECK_EQUAL(loads, 1U);
+    BOOST_CHECK_EQUAL(store.ResidentPayloads(), 2U);
+
+    // The one-entry discretionary cache evicts A when B is materialized.
+    BOOST_CHECK_EQUAL(b.TimeMax(), 101U);
+    BOOST_CHECK_EQUAL(loads, 2U);
+    BOOST_CHECK(!a.HasResidentPayload());
+    BOOST_CHECK(b.HasResidentPayload());
+    BOOST_CHECK(c.HasResidentPayload());
+
+    const auto stats{store.GetResidencyStats()};
+    BOOST_CHECK_EQUAL(stats.backing_reads, 2U);
+    BOOST_CHECK_EQUAL(stats.payload_cache_evictions, 1U);
+    BOOST_CHECK_EQUAL(stats.no_io_violations, 0U);
+}
+
 BOOST_AUTO_TEST_CASE(block_index_store_full_residency_invariants)
 {
     BlockIndexStore store;

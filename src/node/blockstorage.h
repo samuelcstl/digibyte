@@ -266,7 +266,10 @@ public:
         if (index.m_resident_payload) {
             const auto cached{m_payload_cache_index.find(&index)};
             if (cached != m_payload_cache_index.end()) {
-                m_payload_cache_lru.splice(m_payload_cache_lru.begin(), m_payload_cache_lru, cached->second);
+                m_payload_cache_lru.splice(
+                    m_payload_cache_lru.begin(),
+                    m_payload_cache_lru,
+                    cached->second);
             }
             ++m_stats.payload_cache_hits;
             return *index.m_resident_payload;
@@ -274,40 +277,19 @@ public:
 
         ++m_stats.payload_cache_misses;
         if (!m_cache_active) {
-            m_bootstrap_payloads.emplace_back();
-            auto& payload{m_bootstrap_payloads.back()};
-            index.AttachResidentPayload(&payload);
-            ++m_stats.payloads_created;
-            return payload;
+            return CreateEmptyPayload(index);
         }
 
-        if (!m_payload_loader) throw std::runtime_error("block-index payload loader unavailable");
+        if (!m_payload_loader) {
+            throw std::runtime_error("block-index payload loader unavailable");
+        }
         RecordBackingRead();
 
         BlockIndexResidentPayload payload;
         if (!m_payload_loader(index, payload)) {
             throw std::runtime_error("block-index payload materialization failed");
         }
-
-        const size_t payload_size{sizeof(BlockIndexResidentPayload)};
-        const size_t pinned_bytes{m_pinned_payloads.size() * payload_size};
-        const size_t discretionary_budget{m_cache_limit_bytes > pinned_bytes ? m_cache_limit_bytes - pinned_bytes : 0};
-        const size_t max_cached{std::max<size_t>(1, discretionary_budget / payload_size)};
-
-        while (m_payload_cache_lru.size() >= max_cached) {
-            auto victim{std::prev(m_payload_cache_lru.end())};
-            victim->index->ClearResidentPayload();
-            m_payload_cache_index.erase(victim->index);
-            m_payload_cache_lru.erase(victim);
-            ++m_stats.payload_cache_evictions;
-        }
-
-        m_payload_cache_lru.push_front(CacheEntry{&index, std::move(payload)});
-        auto inserted{m_payload_cache_index.emplace(&index, m_payload_cache_lru.begin())};
-        assert(inserted.second);
-        index.AttachResidentPayload(&m_payload_cache_lru.begin()->payload);
-        ++m_stats.payloads_created;
-        return m_payload_cache_lru.begin()->payload;
+        return InsertCachedPayload(index, std::move(payload));
     }
 
     BlockIndexResidentPayload& EnsureAlgoHistory(CBlockIndex& index)
@@ -405,10 +387,62 @@ private:
         BlockIndexResidentPayload payload{};
     };
 
+    size_t MaxCachedPayloads() const noexcept
+    {
+        const size_t payload_size{sizeof(BlockIndexResidentPayload)};
+        const size_t pinned_bytes{m_pinned_payloads.size() * payload_size};
+        const size_t discretionary_budget{
+            m_cache_limit_bytes > pinned_bytes
+                ? m_cache_limit_bytes - pinned_bytes
+                : 0};
+        return std::max<size_t>(1, discretionary_budget / payload_size);
+    }
+
+    void EvictCachedPayloadIfNeeded()
+    {
+        const size_t max_cached{MaxCachedPayloads()};
+        while (m_payload_cache_lru.size() >= max_cached) {
+            auto victim{std::prev(m_payload_cache_lru.end())};
+            victim->index->ClearResidentPayload();
+            m_payload_cache_index.erase(victim->index);
+            m_payload_cache_lru.erase(victim);
+            ++m_stats.payload_cache_evictions;
+        }
+    }
+
+    BlockIndexResidentPayload& InsertCachedPayload(
+        CBlockIndex& index,
+        BlockIndexResidentPayload payload)
+    {
+        EvictCachedPayloadIfNeeded();
+        m_payload_cache_lru.push_front(CacheEntry{&index, std::move(payload)});
+        auto inserted{
+            m_payload_cache_index.emplace(&index, m_payload_cache_lru.begin())};
+        assert(inserted.second);
+        index.AttachResidentPayload(&m_payload_cache_lru.begin()->payload);
+        ++m_stats.payloads_created;
+        return m_payload_cache_lru.begin()->payload;
+    }
+
+    BlockIndexResidentPayload& CreateEmptyPayload(CBlockIndex& index)
+    {
+        if (!m_cache_active) {
+            m_bootstrap_payloads.emplace_back();
+            auto& payload{m_bootstrap_payloads.back()};
+            index.AttachResidentPayload(&payload);
+            ++m_stats.payloads_created;
+            return payload;
+        }
+        return InsertCachedPayload(index, BlockIndexResidentPayload{});
+    }
+
     void InitializeStoreEntry(CBlockIndex& index)
     {
         index.SetPayloadProvider(this);
-        MaterializeBlockIndexPayload(index);
+        // A newly inserted entry is not necessarily durable yet. It must get
+        // an empty resident payload rather than trying to read its future
+        // compact record before the id/metadata transaction is published.
+        CreateEmptyPayload(index);
     }
 
     void NoteLookup(bool hit) const noexcept
