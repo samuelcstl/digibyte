@@ -1636,6 +1636,48 @@ bool BlockManager::CompactBlockIndexDelta()
         return false;
     }
 
+    for (uint64_t offset = 0; offset < compacted.tail_entries.size(); ++offset) {
+        const BlockIndexId id{
+            static_cast<BlockIndexId>(base_entry_count + offset)};
+        const CompactBlockIndexEntry* stored{target_delta->Get(id)};
+        if (!stored ||
+            std::memcmp(
+                stored,
+                &compacted.tail_entries[offset],
+                sizeof(CompactBlockIndexEntry)) != 0) {
+            LogPrintf("Compact block index: compacted metadata checkpoint content mismatch id=%u\n",
+                      id);
+            return false;
+        }
+    }
+
+    size_t base_update_index{0};
+    bool base_update_mismatch{false};
+    error.clear();
+    if (!verified_log->ForEach(
+            [&](const CompactBlockIndexDeltaLogRecord& stored) {
+                if (base_update_index >= compacted.base_updates.size() ||
+                    std::memcmp(
+                        &stored,
+                        &compacted.base_updates[base_update_index],
+                        sizeof(CompactBlockIndexDeltaLogRecord)) != 0) {
+                    base_update_mismatch = true;
+                    return false;
+                }
+                ++base_update_index;
+                return true;
+            },
+            error)) {
+        LogPrintf("Compact block index: compacted metadata log content verification failed: %s\n",
+                  error);
+        return false;
+    }
+    if (base_update_mismatch ||
+        base_update_index != compacted.base_updates.size()) {
+        LogPrintf("Compact block index: compacted metadata base overlay content mismatch\n");
+        return false;
+    }
+
     CompactBlockIndexDeltaCompaction verify_plan;
     error.clear();
     if (!CompactBlockIndexDelta::PlanCompaction(
