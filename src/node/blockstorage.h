@@ -276,6 +276,12 @@ public:
         }
 
         ++m_stats.payload_cache_misses;
+
+        // If a standalone/transient CBlockIndex is first materialized through
+        // this store, make the ownership boundary explicit before attaching a
+        // store-owned payload. Store-managed entries already point back here.
+        index.SetPayloadProvider(this);
+
         if (!m_cache_active) {
             return CreateEmptyPayload(index);
         }

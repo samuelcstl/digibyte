@@ -315,7 +315,7 @@ BOOST_AUTO_TEST_CASE(digibyte_algo_history_residency_equivalence)
 
     node::BlockIndexStore store{node::BlockIndexResidencyMode::BALANCED, 30};
     BOOST_CHECK_EQUAL(store.PrewarmAlgoHistory(&blocks.back()), 30U);
-    BOOST_CHECK_EQUAL(store.ResidentAlgoPayloads(), 30U);
+    BOOST_CHECK_EQUAL(store.ResidentPayloads(), 30U);
     BOOST_CHECK(!blocks[89].HasResidentAlgoHistory());
     BOOST_CHECK(blocks[90].HasResidentAlgoHistory());
 
