@@ -952,6 +952,88 @@ BOOST_AUTO_TEST_CASE(block_index_store_payload_cache_indirection)
     BOOST_CHECK(!store.PayloadEvictionEnabled());
 }
 
+BOOST_AUTO_TEST_CASE(block_index_store_cold_known_payload_pin_before_no_io)
+{
+    const size_t budget{2 * sizeof(BlockIndexResidentPayload)};
+    BlockIndexStore store{
+        BlockIndexResidencyMode::LOWMEM,
+        /*hot_depth=*/1,
+        budget};
+
+    const uint256 hash_a{uint256S("01")};
+    const uint256 hash_b{uint256S("02")};
+    const uint256 hash_c{uint256S("03")};
+
+    auto [it_a, inserted_a] = store.try_emplace(hash_a);
+    auto [it_b, inserted_b] = store.try_emplace(hash_b);
+    auto [it_c, inserted_c] = store.try_emplace(hash_c);
+    BOOST_REQUIRE(inserted_a && inserted_b && inserted_c);
+
+    CBlockIndex& a{it_a->second};
+    CBlockIndex& b{it_b->second};
+    CBlockIndex& c{it_c->second};
+
+    a.m_compact_id = 0;
+    b.m_compact_id = 1;
+    c.m_compact_id = 2;
+    a.nHeight = 0;
+    b.nHeight = 1;
+    c.nHeight = 2;
+    b.pprev = &a;
+    c.pprev = &b;
+
+    a.StorageFile() = 10;
+    b.StorageFile() = 11;
+    c.StorageFile() = 12;
+
+    std::array<BlockIndexResidentPayload, 3> backing{
+        a.ResidentPayload(),
+        b.ResidentPayload(),
+        c.ResidentPayload()};
+    size_t loads{0};
+
+    // Model an already-known header ahead of the active tip: B is the active
+    // hot tip, while C exists in the block index but becomes cold when the
+    // historical bootstrap payload arena is released.
+    BOOST_REQUIRE(store.ActivatePayloadCache(
+        &b,
+        [&](const CBlockIndex& index, BlockIndexResidentPayload& payload) {
+            BOOST_REQUIRE(index.m_compact_id < backing.size());
+            payload = backing[index.m_compact_id];
+            ++loads;
+            return true;
+        }));
+
+    BOOST_CHECK(b.HasResidentPayload());
+    BOOST_CHECK(!c.HasResidentPayload());
+
+    {
+        // AcceptBlock must do this before entering its no-I/O section.
+        auto pre_pin = store.PinPayloadScoped(c);
+        BOOST_CHECK(c.HasResidentPayload());
+        BOOST_CHECK_EQUAL(loads, 1U);
+
+        auto no_io = store.EnterNoIO();
+        BOOST_CHECK(!store.BackingReadAllowed());
+
+        // Model ReceivedBlockTransactions taking its dirty pin and mutating the
+        // payload while the no-I/O guard is active.
+        store.PinPayload(c);
+        c.StorageFile() = 42;
+        c.DataPos() = 43;
+        c.UndoPos() = 44;
+        store.ReleasePayloadPin(c);
+
+        BOOST_CHECK_EQUAL(c.StorageFile(), 42);
+        BOOST_CHECK_EQUAL(c.DataPos(), 43U);
+        BOOST_CHECK_EQUAL(c.UndoPos(), 44U);
+    }
+
+    const auto stats{store.GetResidencyStats()};
+    BOOST_CHECK_EQUAL(stats.backing_reads, 1U);
+    BOOST_CHECK_EQUAL(stats.no_io_violations, 0U);
+}
+
 BOOST_AUTO_TEST_CASE(block_index_store_bootstrap_arena_pointer_stability)
 {
     BlockIndexStore store{BlockIndexResidencyMode::BALANCED, 8};

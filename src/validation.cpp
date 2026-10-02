@@ -5167,8 +5167,6 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     if (!accepted_header)
         return false;
 
-    auto block_index_no_io = m_blockman.m_block_index.EnterNoIO();
-
     // Check all requested blocks that we do not already have for validity and
     // save them to disk. Skip processing of unrequested blocks as an anti-DoS
     // measure, unless the blocks have more work than the active chain tip, and
@@ -5202,6 +5200,14 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         // request; don't process these.
         if (pindex->nChainWork < MinimumChainWork()) return true;
     }
+
+    // A block can arrive for a header that was loaded before cache activation
+    // but is ahead of (or otherwise outside) the active-chain hot window. Its
+    // payload is therefore legitimately cold. Materialize and pin it before
+    // entering the no-I/O validation section so later block-data bookkeeping
+    // can update file/position fields without faulting historical backing.
+    auto block_payload_pin = m_blockman.m_block_index.PinPayloadScoped(*pindex);
+    auto block_index_no_io = m_blockman.m_block_index.EnterNoIO();
 
     const CChainParams& params{GetParams()};
 
