@@ -4178,9 +4178,42 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                     break;
                 }
 
+                // Prepare every payload that ActivateBestChainStep may need
+                // before entering its no-I/O scope. Ordinary validation keeps
+                // using CBlockIndex*; this is the residency boundary promised
+                // by the original cache design.
+                std::vector<CBlockIndex*> residency_pins;
+                const CBlockIndex* residency_fork{m_chain.FindFork(pindexMostWork)};
+                for (CBlockIndex* p{pindexMostWork};
+                     p && p != residency_fork;
+                     p = p->pprev) {
+                    m_blockman.m_block_index.PinPayload(*p);
+                    residency_pins.push_back(p);
+                }
+                for (CBlockIndex* p{m_chain.Tip()};
+                     p && p != residency_fork;
+                     p = p->pprev) {
+                    m_blockman.m_block_index.PinPayload(*p);
+                    residency_pins.push_back(p);
+                }
+
                 bool fInvalidFound = false;
                 std::shared_ptr<const CBlock> nullBlockPtr;
-                if (!ActivateBestChainStep(state, pindexMostWork, pblock && pblock->GetHash() == pindexMostWork->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, connectTrace)) {
+                const bool step_ok{
+                    ActivateBestChainStep(
+                        state,
+                        pindexMostWork,
+                        pblock && pblock->GetHash() == pindexMostWork->GetBlockHash()
+                            ? pblock
+                            : nullBlockPtr,
+                        fInvalidFound,
+                        connectTrace)};
+
+                for (CBlockIndex* p : residency_pins) {
+                    m_blockman.m_block_index.ReleasePayloadPin(*p);
+                }
+
+                if (!step_ok) {
                     // A system error occurred
                     return false;
                 }

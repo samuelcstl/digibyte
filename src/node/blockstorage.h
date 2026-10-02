@@ -35,7 +35,6 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -313,12 +312,15 @@ public:
     void PinPayload(CBlockIndex& index)
     {
         MaterializeBlockIndexPayload(index);
-        if (m_cache_active) m_payload_pins.insert(&index);
+        if (m_cache_active) ++m_payload_pins[&index];
     }
 
     void ReleasePayloadPin(CBlockIndex& index)
     {
-        m_payload_pins.erase(&index);
+        const auto it{m_payload_pins.find(&index)};
+        if (it == m_payload_pins.end()) return;
+        assert(it->second > 0);
+        if (--it->second == 0) m_payload_pins.erase(it);
     }
 
     bool ActivatePayloadCache(CBlockIndex* tip, PayloadLoader loader)
@@ -467,7 +469,7 @@ private:
         // A newly inserted entry is not durable yet. Give it an empty resident
         // payload and pin it until WriteBlockIndexDB commits the normal batch.
         CreateEmptyPayload(index);
-        if (m_cache_active) m_payload_pins.insert(&index);
+        if (m_cache_active) ++m_payload_pins[&index];
     }
 
     void NoteLookup(bool hit) const noexcept
@@ -489,7 +491,7 @@ private:
     std::deque<BlockIndexResidentPayload> m_pinned_payloads;
     std::list<CacheEntry> m_payload_cache_lru;
     std::unordered_map<CBlockIndex*, std::list<CacheEntry>::iterator> m_payload_cache_index;
-    std::unordered_set<CBlockIndex*> m_payload_pins;
+    std::unordered_map<CBlockIndex*, uint32_t> m_payload_pins;
     PayloadLoader m_payload_loader;
     bool m_cache_active{false};
 
