@@ -966,7 +966,7 @@ BOOST_AUTO_TEST_CASE(block_index_store_bootstrap_arena_pointer_stability)
 
     for (uint32_t i = 2; i < 140000; ++i) {
         uint256 hash;
-        hash.SetUint64(i);
+        WriteLE32(hash.data(), i);
         auto [it, inserted] = store.try_emplace(hash);
         BOOST_REQUIRE(inserted);
         it->second.StorageFile() = static_cast<int>(i & 0x7fffffff);
