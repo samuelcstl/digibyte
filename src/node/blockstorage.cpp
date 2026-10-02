@@ -2371,7 +2371,9 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
         best_header = pindexNew;
     }
 
-    m_dirty_blockindex.insert(pindexNew);
+    if (m_dirty_blockindex.insert(pindexNew).second) {
+        m_block_index.PinPayload(*pindexNew);
+    }
 
     return pindexNew;
 }
@@ -2384,13 +2386,14 @@ void BlockManager::PruneOneBlockFile(const int fileNumber)
     for (auto& entry : m_block_index) {
         CBlockIndex* pindex = &entry.second;
         if (pindex->StorageFile() == fileNumber) {
-            m_block_index.PinPayload(*pindex);
             pindex->nStatus &= ~BLOCK_HAVE_DATA;
             pindex->nStatus &= ~BLOCK_HAVE_UNDO;
             pindex->StorageFile() = 0;
             pindex->DataPos() = 0;
             pindex->UndoPos() = 0;
-            m_dirty_blockindex.insert(pindex);
+            if (m_dirty_blockindex.insert(pindex).second) {
+                m_block_index.PinPayload(*pindex);
+            }
 
             // Prune from m_blocks_unlinked -- any block we prune would have
             // to be downloaded again in order to consider its chain, at which
@@ -3383,7 +3386,7 @@ bool BlockManager::WriteUndoDataForBlock(const CBlockUndo& blockundo, BlockValid
     // Write undo information to disk
     if (block.GetUndoPos().IsNull()) {
         FlatFilePos _pos;
-        if (!FindUndoPos(state, block.nFile, _pos, ::GetSerializeSize(blockundo, CLIENT_VERSION) + 40)) {
+        if (!FindUndoPos(state, block.StorageFile(), _pos, ::GetSerializeSize(blockundo, CLIENT_VERSION) + 40)) {
             return error("ConnectBlock(): FindUndoPos failed");
         }
         if (!UndoWriteToDisk(blockundo, _pos, block.pprev->GetBlockHash())) {
@@ -3407,10 +3410,11 @@ bool BlockManager::WriteUndoDataForBlock(const CBlockUndo& blockundo, BlockValid
             cursor.undo_height = block.nHeight;
         }
         // update nUndoPos in block index
-        m_block_index.PinPayload(block);
         block.UndoPos() = _pos.nPos;
         block.nStatus |= BLOCK_HAVE_UNDO;
-        m_dirty_blockindex.insert(&block);
+        if (m_dirty_blockindex.insert(&block).second) {
+            m_block_index.PinPayload(block);
+        }
     }
 
     return true;

@@ -466,10 +466,10 @@ private:
     void InitializeStoreEntry(CBlockIndex& index)
     {
         index.SetPayloadProvider(this);
-        // A newly inserted entry is not durable yet. Give it an empty resident
-        // payload and pin it until WriteBlockIndexDB commits the normal batch.
+        // A newly inserted entry has an empty resident payload. The first
+        // insertion into m_dirty_blockindex owns its dirty pin, so repeated
+        // mutations cannot leak pin references.
         CreateEmptyPayload(index);
-        if (m_cache_active) ++m_payload_pins[&index];
     }
 
     void NoteLookup(bool hit) const noexcept
