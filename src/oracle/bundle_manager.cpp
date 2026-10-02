@@ -9,6 +9,12 @@
 #include <chrono>
 #include <limits>
 
+#include <clientversion.h>
+#include <hash.h>
+#include <streams.h>
+#include <util/fs.h>
+#include <util/fs_helpers.h>
+
 #include <chainparams.h>
 #include <common/args.h>
 #include <consensus/consensus.h>
@@ -52,6 +58,168 @@ int32_t GetBestHeight() {
 }
 
 namespace {
+
+static constexpr uint64_t ORACLE_STARTUP_STATE_MAGIC{0x314554415453524fULL};
+static constexpr uint32_t ORACLE_STARTUP_STATE_VERSION{1};
+static constexpr int ORACLE_STARTUP_PRICE_CACHE_BLOCKS{20};
+static constexpr size_t ORACLE_STARTUP_MAX_VOLATILITY_POINTS{30 * 24};
+
+struct OracleStartupState
+{
+    uint64_t magic{ORACLE_STARTUP_STATE_MAGIC};
+    uint32_t version{ORACLE_STARTUP_STATE_VERSION};
+    uint256 genesis_hash{};
+    int32_t tip_height{-1};
+    uint256 tip_hash{};
+
+    std::vector<int32_t> price_heights;
+    std::vector<uint64_t> prices;
+    std::vector<int64_t> price_times;
+
+    std::vector<int64_t> volatility_prices;
+    std::vector<int64_t> volatility_times;
+    std::vector<uint32_t> volatility_heights;
+};
+
+template <typename Stream>
+void WriteOracleStartupStateFields(Stream& stream, const OracleStartupState& state)
+{
+    stream << state.magic;
+    stream << state.version;
+    stream << state.genesis_hash;
+    stream << state.tip_height;
+    stream << state.tip_hash;
+    stream << state.price_heights;
+    stream << state.prices;
+    stream << state.price_times;
+    stream << state.volatility_prices;
+    stream << state.volatility_times;
+    stream << state.volatility_heights;
+}
+
+uint256 OracleStartupStateChecksum(const OracleStartupState& state)
+{
+    CHashWriter hasher{CLIENT_VERSION};
+    WriteOracleStartupStateFields(hasher, state);
+    return hasher.GetHash();
+}
+
+fs::path OracleStartupStatePath()
+{
+    return gArgs.GetDataDirNet() / "oracle-startup.dat";
+}
+
+bool ValidateOracleStartupStateShape(const OracleStartupState& state, std::string& error)
+{
+    if (state.magic != ORACLE_STARTUP_STATE_MAGIC ||
+        state.version != ORACLE_STARTUP_STATE_VERSION) {
+        error = "unsupported magic/version";
+        return false;
+    }
+
+    if (state.tip_height < 0) {
+        error = "invalid tip height";
+        return false;
+    }
+
+    if (state.price_heights.size() != state.prices.size() ||
+        state.price_heights.size() != state.price_times.size() ||
+        state.price_heights.size() > ORACLE_STARTUP_PRICE_CACHE_BLOCKS) {
+        error = "invalid price-cache vector sizes";
+        return false;
+    }
+
+    if (state.volatility_prices.size() != state.volatility_times.size() ||
+        state.volatility_prices.size() != state.volatility_heights.size() ||
+        state.volatility_prices.size() > ORACLE_STARTUP_MAX_VOLATILITY_POINTS) {
+        error = "invalid volatility-history vector sizes";
+        return false;
+    }
+
+    return true;
+}
+
+bool ReadOracleStartupState(OracleStartupState& state, std::string& error)
+{
+    const fs::path path{OracleStartupStatePath()};
+    if (!fs::exists(path)) {
+        error = "checkpoint does not exist";
+        return false;
+    }
+
+    CAutoFile file{fsbridge::fopen(path, "rb"), CLIENT_VERSION};
+    if (file.IsNull()) {
+        error = "cannot open checkpoint";
+        return false;
+    }
+
+    try {
+        file >> state.magic;
+        file >> state.version;
+        file >> state.genesis_hash;
+        file >> state.tip_height;
+        file >> state.tip_hash;
+        file >> state.price_heights;
+        file >> state.prices;
+        file >> state.price_times;
+        file >> state.volatility_prices;
+        file >> state.volatility_times;
+        file >> state.volatility_heights;
+
+        uint256 stored_checksum;
+        file >> stored_checksum;
+
+        if (!ValidateOracleStartupStateShape(state, error)) return false;
+
+        const uint256 calculated{OracleStartupStateChecksum(state)};
+        if (stored_checksum != calculated) {
+            error = "checksum mismatch";
+            return false;
+        }
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+
+    return true;
+}
+
+bool WriteOracleStartupState(const OracleStartupState& state, std::string& error)
+{
+    if (!ValidateOracleStartupStateShape(state, error)) return false;
+
+    const fs::path path{OracleStartupStatePath()};
+    fs::path tmp{path};
+    tmp += ".new";
+
+    {
+        CAutoFile file{fsbridge::fopen(tmp, "wb"), CLIENT_VERSION};
+        if (file.IsNull()) {
+            error = "cannot create temporary checkpoint";
+            return false;
+        }
+
+        try {
+            WriteOracleStartupStateFields(file, state);
+            file << OracleStartupStateChecksum(state);
+            if (!FileCommit(file.Get())) {
+                error = "checkpoint fsync failed";
+                return false;
+            }
+        } catch (const std::exception& e) {
+            error = e.what();
+            return false;
+        }
+    }
+
+    if (!RenameOver(tmp, path)) {
+        error = "checkpoint rename failed";
+        return false;
+    }
+    DirectoryCommit(path.parent_path());
+    return true;
+}
+
 bool IsFreshLiveOracleTimestamp(int64_t timestamp, int64_t now)
 {
     return timestamp > 0 &&
@@ -1790,54 +1958,112 @@ bool OracleBundleManager::LoadPricesFromChain(ChainstateManager& chainman)
 
     LOCK(cs_main);
 
-    // Get the active chain tip
     CBlockIndex* pindex = chainman.ActiveChain().Tip();
     if (!pindex) {
         LogPrintf("Oracle: No active chain tip, skipping price loading\n");
         return true;
     }
 
-    int tip_height = pindex->nHeight;
+    const int tip_height = pindex->nHeight;
 
-    // Only scan if DigiDollar is active via BIP9 deployment
     if (!DigiDollar::IsDigiDollarEnabled(pindex, chainman)) {
         LogPrintf("Oracle: DigiDollar not yet active (BIP9) at height %d, skipping price loading\n",
-                 tip_height);
+                  tip_height);
         return true;
     }
 
-    // DigiDollar activation floor: blocks at/above it are guaranteed retained on a
-    // pruned node (the "digidollar" prune lock). An unreadable block THERE means the
-    // data is damaged and we must fail closed. Below it — or when the floor is 0
-    // (default regtest ALWAYS_ACTIVE, where no retention is guaranteed and no lock is
-    // registered) — a missing block is a legitimate prune/assumeutxo state, not damage.
     const int dd_floor = DigiDollar::EarliestActivationFloor(consensus);
 
-    // Scan recent blocks for the live oracle cache and enough history to
-    // deterministically rebuild volatility state after restart/reindex.
     static constexpr int ORACLE_VALIDITY_BLOCKS = 20;
     static constexpr int VOLATILITY_HISTORY_BLOCKS = 30 * 24 * 60 * 4;
-    int scan_depth = std::min(std::max(ORACLE_VALIDITY_BLOCKS, VOLATILITY_HISTORY_BLOCKS), tip_height);
-    const int price_cache_start_height = std::max(0, tip_height - ORACLE_VALIDITY_BLOCKS + 1);
+    const int scan_depth =
+        std::min(std::max(ORACLE_VALIDITY_BLOCKS, VOLATILITY_HISTORY_BLOCKS), tip_height);
+    const int start_height = std::max(0, tip_height - scan_depth + 1);
+    const int price_cache_start_height =
+        std::max(0, tip_height - ORACLE_VALIDITY_BLOCKS + 1);
+
     int prices_found = 0;
     int skipped_pre_activation = 0;
+    int scan_start_height = start_height;
+    bool checkpoint_restored = false;
     std::vector<DigiDollar::Volatility::PricePoint> volatility_prices;
 
-    LogPrintf("Oracle: Scanning last %d blocks for oracle prices (height %d to %d)...\n",
-             scan_depth, tip_height - scan_depth + 1, tip_height);
+    OracleStartupState checkpoint;
+    std::string checkpoint_error;
+    if (ReadOracleStartupState(checkpoint, checkpoint_error)) {
+        const bool genesis_matches{
+            checkpoint.genesis_hash == consensus.hashGenesisBlock};
+        const bool height_usable{
+            checkpoint.tip_height >= start_height - 1 &&
+            checkpoint.tip_height <= tip_height};
+        const CBlockIndex* checkpoint_index{
+            height_usable ? chainman.ActiveChain()[checkpoint.tip_height] : nullptr};
+        const bool chain_anchor_matches{
+            checkpoint_index &&
+            checkpoint_index->GetBlockHash() == checkpoint.tip_hash};
 
-    const int start_height = std::max(0, tip_height - scan_depth + 1);
-    for (int height = start_height; height <= tip_height; ++height) {
+        if (genesis_matches && height_usable && chain_anchor_matches) {
+            {
+                std::lock_guard<std::mutex> bundles_lock(manager.mtx_bundles);
+                std::lock_guard<std::mutex> price_lock(manager.mtx_price_cache);
+                manager.height_to_price.clear();
+                manager.height_to_price_time.clear();
+                manager.cached_price = 0;
+                manager.last_update_time = 0;
+            }
+
+            for (size_t i = 0; i < checkpoint.price_heights.size(); ++i) {
+                const int height{checkpoint.price_heights[i]};
+                if (height < price_cache_start_height ||
+                    height > checkpoint.tip_height) {
+                    continue;
+                }
+                manager.UpdatePriceCache(
+                    height, checkpoint.prices[i], checkpoint.price_times[i]);
+                ++prices_found;
+            }
+
+            volatility_prices.reserve(
+                checkpoint.volatility_prices.size() + ORACLE_STARTUP_MAX_VOLATILITY_POINTS);
+            for (size_t i = 0; i < checkpoint.volatility_prices.size(); ++i) {
+                volatility_prices.emplace_back(
+                    static_cast<CAmount>(checkpoint.volatility_prices[i]),
+                    checkpoint.volatility_times[i],
+                    checkpoint.volatility_heights[i]);
+            }
+
+            scan_start_height = std::max(start_height, checkpoint.tip_height + 1);
+            checkpoint_restored = true;
+            LogPrintf(
+                "Oracle: restored startup checkpoint height=%d hash=%s prices=%u volatility_points=%u; replaying %d blocks\n",
+                checkpoint.tip_height,
+                checkpoint.tip_hash.ToString(),
+                prices_found,
+                volatility_prices.size(),
+                tip_height >= scan_start_height ? tip_height - scan_start_height + 1 : 0);
+        } else {
+            LogPrintf(
+                "Oracle: startup checkpoint rejected genesis=%d height_usable=%d chain_anchor=%d; rebuilding from chain\n",
+                genesis_matches,
+                height_usable,
+                chain_anchor_matches);
+        }
+    } else {
+        LogPrintf("Oracle: startup checkpoint unavailable (%s); rebuilding from chain\n",
+                  checkpoint_error);
+    }
+
+    LogPrintf(
+        "Oracle: %s oracle startup scan height %d to %d (%d blocks)\n",
+        checkpoint_restored ? "replaying" : "scanning",
+        scan_start_height,
+        tip_height,
+        tip_height >= scan_start_height ? tip_height - scan_start_height + 1 : 0);
+
+    for (int height = scan_start_height; height <= tip_height; ++height) {
         CBlockIndex* block_index = chainman.ActiveChain()[height];
         if (!block_index) continue;
 
-        // L1 (startup-hang fix): evaluate the BIP9 DigiDollar-activation gate through
-        // the SHARED, memoized versionbits cache (via chainman) instead of allocating a
-        // throwaway VersionBitsCache on every one of the up-to ~172,800 iterations. It
-        // computes the IDENTICAL activation boolean ConnectBlock uses — a pure,
-        // O(1)-amortized performance change with no consensus effect (pinned by
-        // digidollar_oracle_startup_tests.cpp). Pre-activation blocks are counted and
-        // reported once after the loop instead of logged per block.
         if (!ShouldLoadStartupOraclePriceForBlock(height, block_index, chainman)) {
             ++skipped_pre_activation;
             continue;
@@ -1846,54 +2072,51 @@ bool OracleBundleManager::LoadPricesFromChain(ChainstateManager& chainman)
         CBlock block;
         if (!chainman.m_blockman.ReadBlockFromDisk(block, *block_index)) {
             if (dd_floor > 0 && height >= dd_floor) {
-                // A block inside the guaranteed-retained DigiDollar window is
-                // unreadable (e.g. a truncated/partially-restored blk file that the
-                // index-flag startup guard cannot see). Fail CLOSED: the volatility
-                // freeze state reconstructed here is enforced as a consensus rule
-                // post-activation, so refusing to start beats rebuilding it from
-                // partial price history and diverging from the network.
                 LogPrintf("ERROR: Oracle: failed to read block at height %d during startup "
                           "price reconstruction (>= DigiDollar floor %d). Block data is "
                           "incomplete; restart with -reindex.\n", height, dd_floor);
                 return false;
             }
-            // Below the floor (or floor 0, e.g. default regtest / assumeutxo gaps)
-            // a missing block is a legitimate prune state, not damage.
             LogPrint(BCLog::DIGIDOLLAR,
                      "Oracle: skipping unreadable pre-floor block at height %d during "
                      "startup price reconstruction\n", height);
             continue;
         }
 
-        // Extract oracle bundle from coinbase
         if (block.vtx.empty()) continue;
         const CTransaction& coinbase = *block.vtx[0];
 
         COracleBundle bundle;
-        if (manager.ExtractOracleBundle(coinbase, bundle)) {
-            if (bundle.median_price_micro_usd > 0) {
-                BlockValidationState state;
-                if (!OracleDataValidator::ValidateBlockOracleData(block, block_index->pprev, consensus, state)) {
-                    LogPrintf("Oracle: Skipping invalid startup oracle bundle at height %d: %s\n",
-                             height, state.ToString());
-                    continue;
-                }
-                if (height >= price_cache_start_height) {
-                    manager.UpdatePriceCache(height, bundle.median_price_micro_usd, bundle.timestamp);
-                    prices_found++;
-                }
-                if (BlockHasDigiDollarMint(block)) {
-                    const int64_t block_time = block.GetBlockTime();
-                    if (volatility_prices.empty() ||
-                        block_time - volatility_prices.back().timestamp >= 3600) {
-                        volatility_prices.emplace_back(static_cast<CAmount>(bundle.median_price_micro_usd),
-                                                       block_time,
-                                                       static_cast<uint32_t>(height));
-                    }
-                }
-                LogPrint(BCLog::DIGIDOLLAR, "Oracle: Found price %llu micro-USD at height %d\n",
-                         bundle.median_price_micro_usd, height);
+        if (manager.ExtractOracleBundle(coinbase, bundle) &&
+            bundle.median_price_micro_usd > 0) {
+            BlockValidationState state;
+            if (!OracleDataValidator::ValidateBlockOracleData(
+                    block, block_index->pprev, consensus, state)) {
+                LogPrintf("Oracle: Skipping invalid startup oracle bundle at height %d: %s\n",
+                          height, state.ToString());
+                continue;
             }
+
+            if (height >= price_cache_start_height) {
+                manager.UpdatePriceCache(
+                    height, bundle.median_price_micro_usd, bundle.timestamp);
+                ++prices_found;
+            }
+
+            if (BlockHasDigiDollarMint(block)) {
+                const int64_t block_time = block.GetBlockTime();
+                if (volatility_prices.empty() ||
+                    block_time - volatility_prices.back().timestamp >= 3600) {
+                    volatility_prices.emplace_back(
+                        static_cast<CAmount>(bundle.median_price_micro_usd),
+                        block_time,
+                        static_cast<uint32_t>(height));
+                }
+            }
+
+            LogPrint(BCLog::DIGIDOLLAR,
+                     "Oracle: Found price %llu micro-USD at height %d\n",
+                     bundle.median_price_micro_usd, height);
         }
     }
 
@@ -1907,11 +2130,78 @@ bool OracleBundleManager::LoadPricesFromChain(ChainstateManager& chainman)
         volatility_prices, static_cast<uint32_t>(tip_height));
 
     if (prices_found > 0) {
-        LogPrintf("Oracle: Loaded %d oracle prices from blockchain, latest price: %llu micro-USD\n",
-                 prices_found, manager.GetLatestPrice());
+        LogPrintf("Oracle: Loaded %d oracle prices into startup cache, latest price: %llu micro-USD\n",
+                  prices_found, manager.GetLatestPrice());
     } else {
         LogPrintf("Oracle: No oracle prices found in recent blocks\n");
     }
+
+    if (!SaveStartupState(chainman)) {
+        LogPrintf("Oracle: WARNING - failed to persist startup checkpoint; next restart will rebuild from chain\n");
+    }
+
+    return true;
+}
+
+bool OracleBundleManager::SaveStartupState(ChainstateManager& chainman)
+{
+    OracleBundleManager& manager = GetInstance();
+    const Consensus::Params& consensus = Params().GetConsensus();
+
+    LOCK(cs_main);
+
+    CBlockIndex* tip = chainman.ActiveChain().Tip();
+    if (!tip || !DigiDollar::IsDigiDollarEnabled(tip, chainman)) {
+        return true;
+    }
+
+    OracleStartupState state;
+    state.genesis_hash = consensus.hashGenesisBlock;
+    state.tip_height = tip->nHeight;
+    state.tip_hash = tip->GetBlockHash();
+
+    const int price_cache_start_height{
+        std::max(0, state.tip_height - ORACLE_STARTUP_PRICE_CACHE_BLOCKS + 1)};
+
+    {
+        std::lock_guard<std::mutex> price_lock(manager.mtx_price_cache);
+        auto it = manager.height_to_price.lower_bound(price_cache_start_height);
+        for (; it != manager.height_to_price.end(); ++it) {
+            const int height{it->first};
+            if (height > state.tip_height) break;
+
+            state.price_heights.push_back(height);
+            state.prices.push_back(it->second);
+            const auto time_it{manager.height_to_price_time.find(height)};
+            state.price_times.push_back(
+                time_it != manager.height_to_price_time.end() ? time_it->second : 0);
+        }
+    }
+
+    const auto volatility_history{
+        DigiDollar::Volatility::VolatilityMonitor::GetPriceHistory()};
+    state.volatility_prices.reserve(volatility_history.size());
+    state.volatility_times.reserve(volatility_history.size());
+    state.volatility_heights.reserve(volatility_history.size());
+    for (const auto& point : volatility_history) {
+        state.volatility_prices.push_back(static_cast<int64_t>(point.price));
+        state.volatility_times.push_back(point.timestamp);
+        state.volatility_heights.push_back(point.height);
+    }
+
+    std::string error;
+    if (!WriteOracleStartupState(state, error)) {
+        LogPrintf("Oracle: failed writing startup checkpoint: %s\n", error);
+        return false;
+    }
+
+    LogPrintf(
+        "Oracle: persisted startup checkpoint height=%d hash=%s prices=%u volatility_points=%u path=%s\n",
+        state.tip_height,
+        state.tip_hash.ToString(),
+        state.price_heights.size(),
+        state.volatility_prices.size(),
+        fs::PathToString(OracleStartupStatePath()));
     return true;
 }
 

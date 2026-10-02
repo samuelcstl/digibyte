@@ -280,6 +280,11 @@ void Shutdown(NodeContext& node)
     OracleSigningOrchestrator::Shutdown();
     OracleManager::StopOracleService();
     g_get_oracle_consensus_price = nullptr;
+    if (node.chainman && g_oracle_bundle_manager) {
+        if (!OracleBundleManager::SaveStartupState(*node.chainman)) {
+            LogPrintf("Shutdown: oracle startup checkpoint persistence failed\n");
+        }
+    }
     OracleBundleManager::Shutdown();
 
     StopHTTPRPC();
