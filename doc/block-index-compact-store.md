@@ -51,6 +51,37 @@ The target lookup path is:
 The fingerprint key must be process-random/keyed so a peer cannot deliberately
 manufacture collisions that force backing-store work.
 
+## Residency integration and execution order
+
+The compact representation is backing storage for the residency design in
+`doc/block-index-residency.md`; it is not a mandate to rewrite ordinary
+validation/mining code around `BlockIndexId`.
+
+The first hybrid cut-over therefore preserves the stable `CBlockIndex*`
+identity/topology shell and moves selected historical payload domains behind
+`BlockIndexStore`. The current batch moves block/undo positions, merkle root
+and `nTimeMax`, adds the configurable `-blockindexcache=<MiB>` budget, pins
+the active hot window, and serves historical misses from the compact base plus
+the latest delta overlay. Dirty/new payloads are pinned through the existing
+canonical `WriteBlockIndexDB()` transaction so cache eviction cannot discard
+unflushed metadata.
+
+On 64-bit builds this reduces the stable shell from 152 to 112 bytes without
+changing pointer identity. This is intentionally a measurable RAM-payoff stage,
+not the final shell-eviction stage.
+
+The execution order is now explicitly residency-first:
+
+1. build/test the hybrid payload cache;
+2. measure RSS, page faults and live mining/validation behavior;
+3. move additional domains or convert only pointer owners that materially
+   prevent the next useful eviction;
+4. stop constructing cold historical shells when the hot-materialization
+   boundary has proved itself;
+5. finish generation rollover, lookup maintenance and exhaustive lifecycle
+   hardening as productionization work rather than prerequisites to measuring
+   the cache architecture.
+
 ## Hot materialization
 
 Only blocks needed by live validation/mining/network state should have
@@ -108,10 +139,15 @@ and loading that checkpoint on startup with a bounded fallback scan.
 
 ## Current implementation status
 
-Generation 2 has passed the shadow-equivalence and first lookup milestones, but
-normal startup still materializes the complete legacy block-index graph.
+Generation 2 has passed the shadow-equivalence, live-update and first lookup
+milestones. Normal startup still materializes the complete legacy identity
+graph, but `balanced`/`lowmem` can now release the historical payload arena
+after chain-tip loading and retain only the configured hot/cache working set.
+This is the first cache-backed RAM cut-over and must be measured before deeper
+identity-shell eviction.
 
-Measured on mainnet at approximately 24.3 million records:
+Measured on mainnet at approximately 24.3 million records before this new
+112-byte-shell cut-over:
 
 - the Generation 1 residency extraction reduced the ARM64 `CBlockIndex` shell
   from 208 to 152 bytes and moved the 64-byte per-algorithm accelerator out of
