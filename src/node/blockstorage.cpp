@@ -110,7 +110,7 @@ bool BlockTreeDB::ReadFlag(const std::string& name, bool& fValue)
     return true;
 }
 
-bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
+bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, BlockIndexLoader loadBlockIndex, const util::SignalInterrupt& interrupt)
 {
     AssertLockHeld(::cs_main);
     std::unique_ptr<CDBIterator> pcursor(NewIterator());
@@ -132,24 +132,29 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
         if (pcursor->GetKey(key) && key.first == DB_BLOCK_INDEX) {
             CDiskBlockIndex diskindex;
             if (pcursor->GetValue(diskindex)) {
-                // Construct block index object
-                CBlockIndex* pindexNew = insertBlockIndex(diskindex.ConstructBlockHash());
-                pindexNew->pprev          = insertBlockIndex(diskindex.hashPrev);
-                pindexNew->nHeight        = diskindex.nHeight;
-                pindexNew->StorageFile()  = diskindex.StorageFile();
-                pindexNew->DataPos()      = diskindex.DataPos();
-                pindexNew->UndoPos()      = diskindex.UndoPos();
-                pindexNew->nVersion       = diskindex.nVersion;
-                pindexNew->MerkleRoot()   = diskindex.MerkleRoot();
-                pindexNew->nTime          = diskindex.nTime;
-                pindexNew->nBits          = diskindex.nBits;
-                pindexNew->nNonce         = diskindex.nNonce;
-                pindexNew->nStatus        = diskindex.nStatus;
-                pindexNew->nTx            = diskindex.nTx;
+                // Let BlockManager choose the identity representation. FULL and
+                // legacy fallback populate the unordered_map; direct compact
+                // bootstrap places the canonical record straight into its
+                // preallocated compact-id shell without constructing the map.
+                CBlockIndex* pindexNew{loadBlockIndex(diskindex)};
+                if (!pindexNew) {
+                    return error("%s: block-index loader rejected canonical record %s",
+                                 __func__, diskindex.ConstructBlockHash().ToString());
+                }
                 if (diskindex.HasPersistedChainWork()) {
-                    pindexNew->nChainWork = diskindex.nChainWork;
                     ++nChainWorkCached;
                 }
+
+                const auto disk_pow_hash = [&diskindex]() {
+                    CBlockHeader block;
+                    block.nVersion = diskindex.nVersion;
+                    block.hashPrevBlock = diskindex.hashPrev;
+                    block.hashMerkleRoot = diskindex.MerkleRoot();
+                    block.nTime = diskindex.nTime;
+                    block.nBits = diskindex.nBits;
+                    block.nNonce = diskindex.nNonce;
+                    return GetPoWAlgoHash(block);
+                };
 
                 // Only apply PoW optimization for mainnet
                 // Check if this is mainnet by comparing genesis block hash
@@ -229,14 +234,14 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
 
                     // Only perform expensive proof of work check for genesis and checkpoints
                     if (shouldCheckPoW) {
-                        if (!CheckProofOfWork(pindexNew->GetBlockPoWHash(), pindexNew->nBits, consensusParams)) {
+                        if (!CheckProofOfWork(disk_pow_hash(), pindexNew->nBits, consensusParams)) {
                             return error("%s: CheckProofOfWork failed for checkpoint/genesis block at height %d: %s",
                                        __func__, pindexNew->nHeight, pindexNew->ToString());
                         }
                     }
                 } else {
                     // For testnet and regtest, always check proof of work (original behavior)
-                    if (!CheckProofOfWork(pindexNew->GetBlockPoWHash(), pindexNew->nBits, consensusParams)) {
+                    if (!CheckProofOfWork(disk_pow_hash(), pindexNew->nBits, consensusParams)) {
                         return error("%s: CheckProofOfWork failed: %s", __func__, pindexNew->ToString());
                     }
                 }
@@ -2078,6 +2083,20 @@ bool BlockManager::VerifyCompactBlockIndexLookup()
               m_compact_block_lookup->SizeBytes(),
               Ticks<std::chrono::milliseconds>(verify_elapsed));
 
+    if (m_block_index.RawMap().empty()) {
+        std::string front_error;
+        const auto front_load_start{SteadyClock::now()};
+        if (!m_compact_block_lookup->LoadResidentProbeFront(front_error)) {
+            LogPrintf("Compact block index: resident lookup front unavailable: %s\n",
+                      front_error);
+            return false;
+        }
+        LogPrintf("Compact block index: resident lookup front bytes=%u load=%d ms\n",
+                  m_compact_block_lookup->ResidentProbeFrontBytes(),
+                  Ticks<std::chrono::milliseconds>(SteadyClock::now() - front_load_start));
+        return true;
+    }
+
     // Compare lookup cost against the legacy unordered_map while both
     // representations coexist. Sample uniformly through the persisted
     // generation to avoid an additional allocation.
@@ -2268,6 +2287,324 @@ bool BlockManager::LoadCompactBlockIndexPayload(
     payload.nTimeMax = entry->record.time_max;
     payload.algo_history = nullptr;
     return true;
+}
+
+const CompactBlockIndexEntry* BlockManager::CompactEntryForId(BlockIndexId id) const
+{
+    AssertLockHeld(cs_main);
+
+    const auto overlay{m_compact_block_delta_overlay.find(id)};
+    if (overlay != m_compact_block_delta_overlay.end()) {
+        return &overlay->second;
+    }
+    if (m_compact_block_index &&
+        static_cast<uint64_t>(id) < m_compact_block_index->EntryCount()) {
+        return m_compact_block_index->Get(id);
+    }
+    if (m_compact_block_delta && m_compact_block_delta->IsOpen()) {
+        return m_compact_block_delta->Get(id);
+    }
+    return nullptr;
+}
+
+bool BlockManager::PrepareDirectCompactMetadataBacking()
+{
+    AssertLockHeld(cs_main);
+
+    if (!m_compact_block_index || !m_compact_block_index->IsOpen() ||
+        !m_compact_block_ids || !m_compact_block_ids->IsOpen()) {
+        return false;
+    }
+
+    // Recovery of an interrupted metadata publish requires comparing the
+    // pending batch with canonical LevelDB objects. Let the legacy bootstrap
+    // perform that uncommon recovery path instead of making the direct loader
+    // authoritative before LevelDB has been read.
+    if (fs::exists(CompactBlockIndexDeltaPendingPath())) {
+        LogPrintf("Block-index direct bootstrap: pending compact metadata batch present; using legacy bootstrap for recovery\n");
+        return false;
+    }
+
+    const uint64_t base_generation{m_compact_block_index->Header()->generation};
+    const uint64_t base_entry_count{m_compact_block_index->EntryCount()};
+
+    if (!OpenCompactBlockIndexDeltaState(/*migrate_legacy=*/true)) {
+        return false;
+    }
+
+    if (!m_compact_block_delta || !m_compact_block_delta->IsOpen()) {
+        auto delta = std::make_unique<CompactBlockIndexDelta>();
+        std::string error;
+        const fs::path path{
+            CompactBlockIndexDeltaState::SlotPath(
+                CompactBlockIndexDeltaPath(),
+                m_compact_block_delta_state->ActiveSlot())};
+        if (!delta->Open(
+                path,
+                base_generation,
+                base_entry_count,
+                GetConsensus().hashGenesisBlock,
+                error)) {
+            LogPrintf("Block-index direct bootstrap: cannot open metadata delta %s: %s\n",
+                      fs::PathToString(path), error);
+            return false;
+        }
+        if (delta->TailEntryCount() !=
+            m_compact_block_delta_state->SnapshotTailEntryCount()) {
+            LogPrintf("Block-index direct bootstrap: metadata selector tail mismatch selector=%u delta=%u\n",
+                      m_compact_block_delta_state->SnapshotTailEntryCount(),
+                      delta->TailEntryCount());
+            return false;
+        }
+        m_compact_block_delta = std::move(delta);
+    }
+
+    if (!OpenCompactBlockIndexDeltaLog(/*create=*/false)) {
+        return false;
+    }
+
+    if (m_compact_block_delta->BaseEntryCount() != base_entry_count ||
+        m_compact_block_delta->BaseGeneration() != base_generation) {
+        LogPrintf("Block-index direct bootstrap: metadata backing base binding mismatch\n");
+        return false;
+    }
+
+    const uint64_t snapshot_next{
+        base_entry_count + m_compact_block_delta->TailEntryCount()};
+    if (snapshot_next > m_next_compact_id) {
+        LogPrintf("Block-index direct bootstrap: metadata snapshot newer than id namespace snapshot_next=%u next=%u\n",
+                  snapshot_next, m_next_compact_id);
+        return false;
+    }
+
+    std::unordered_map<BlockIndexId, CompactBlockIndexEntry> overlay;
+    overlay.reserve(static_cast<size_t>(m_compact_block_delta_log->RecordCount()));
+
+    std::string error;
+    bool invalid{false};
+    if (!m_compact_block_delta_log->ForEach(
+            [&](const CompactBlockIndexDeltaLogRecord& update) {
+                if (static_cast<uint64_t>(update.id) >= m_next_compact_id) {
+                    invalid = true;
+                    return false;
+                }
+                overlay[update.id] = update.entry;
+                return true;
+            },
+            error)) {
+        LogPrintf("Block-index direct bootstrap: metadata log replay failed: %s\n", error);
+        return false;
+    }
+    if (invalid) {
+        LogPrintf("Block-index direct bootstrap: metadata log references unpublished compact id\n");
+        return false;
+    }
+
+    m_compact_block_delta_overlay = std::move(overlay);
+    LogPrintf("Block-index direct bootstrap: prepared metadata backing base=%u snapshot_tail=%u next=%u overlay=%u\n",
+              base_entry_count,
+              m_compact_block_delta->TailEntryCount(),
+              m_next_compact_id,
+              m_compact_block_delta_overlay.size());
+    return true;
+}
+
+bool BlockManager::PrepareDirectCompactBootstrap()
+{
+    AssertLockHeld(cs_main);
+
+    if (m_block_index.GetMode() == BlockIndexResidencyMode::FULL) return false;
+
+    // Keep BUILD/recovery semantics on the legacy path for now. Direct startup
+    // is enabled only when all derived identity/backing structures are already
+    // present and explicitly requested in VERIFY mode.
+    if (m_opts.block_index_compact_lookup != kernel::BlockIndexCompactLookupMode::VERIFY ||
+        m_opts.block_index_compact_ids != kernel::BlockIndexCompactIdsMode::VERIFY ||
+        m_opts.block_index_compact_delta != kernel::BlockIndexCompactDeltaMode::VERIFY) {
+        return false;
+    }
+
+    const auto start{SteadyClock::now()};
+    if (!OpenCompactBlockIndexMapped()) {
+        return false;
+    }
+
+    // Verify the mmap lookup before it becomes correctness-relevant. With the
+    // legacy map still empty VerifyCompactBlockIndexLookup() performs only its
+    // source/lookup proof and resident-front load, not the legacy benchmark.
+    if (!VerifyCompactBlockIndexLookup()) {
+        return false;
+    }
+
+    const uint64_t base_generation{m_compact_block_index->Header()->generation};
+    const uint64_t base_entry_count{m_compact_block_index->EntryCount()};
+
+    auto ids = std::make_unique<CompactBlockIndexIds>();
+    std::string error;
+    if (!ids->Open(
+            CompactBlockIndexIdsPath(),
+            base_generation,
+            base_entry_count,
+            GetConsensus().hashGenesisBlock,
+            error)) {
+        LogPrintf("Block-index direct bootstrap: cannot open persistent ids: %s\n", error);
+        return false;
+    }
+
+    m_next_compact_id = ids->NextId();
+    if (m_next_compact_id < base_entry_count ||
+        m_next_compact_id >= static_cast<uint64_t>(INVALID_BLOCK_INDEX_ID)) {
+        LogPrintf("Block-index direct bootstrap: invalid compact id namespace base=%u next=%u\n",
+                  base_entry_count, m_next_compact_id);
+        return false;
+    }
+
+    std::vector<BlockIndexStore::DirectTailIdentity> tail;
+    tail.reserve(static_cast<size_t>(ids->TailEntryCount()));
+    if (!ids->ForEachTail(
+            [&](BlockIndexId id, const uint256& hash) {
+                tail.emplace_back(id, hash);
+                return true;
+            },
+            error)) {
+        LogPrintf("Block-index direct bootstrap: cannot read persistent id tail: %s\n", error);
+        return false;
+    }
+
+    if (tail.size() != ids->TailEntryCount()) {
+        LogPrintf("Block-index direct bootstrap: persistent id tail cardinality mismatch\n");
+        return false;
+    }
+
+    m_compact_block_ids = std::move(ids);
+
+    if (!PrepareDirectCompactMetadataBacking()) {
+        m_compact_block_ids.reset();
+        m_next_compact_id = 0;
+        return false;
+    }
+
+    if (!m_block_index.PrepareDirectCompactIdentity(
+            static_cast<size_t>(m_next_compact_id),
+            static_cast<size_t>(base_entry_count),
+            [this](BlockIndexId id) -> const uint256* {
+                const CompactBlockIndexEntry* entry{m_compact_block_index->Get(id)};
+                return entry ? &entry->hash : nullptr;
+            },
+            tail)) {
+        LogPrintf("Block-index direct bootstrap: failed allocating compact-id shell arena\n");
+        m_compact_block_ids.reset();
+        m_compact_block_delta_overlay.clear();
+        m_next_compact_id = 0;
+        return false;
+    }
+
+    LogPrintf("Block-index direct bootstrap: activated empty dense shells=%u immutable=%u live_tail=%u shell_bytes=%u in %d ms\n",
+              m_block_index.size(),
+              base_entry_count,
+              tail.size(),
+              static_cast<uint64_t>(m_block_index.size()) * sizeof(CBlockIndex),
+              Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
+    return true;
+}
+
+CBlockIndex* BlockManager::LoadDirectCompactBlockIndexRecord(
+    const CDiskBlockIndex& diskindex)
+{
+    AssertLockHeld(cs_main);
+
+    const uint256 hash{diskindex.ConstructBlockHash()};
+    CBlockIndex* index{LookupBlockIndex(hash)};
+    if (!index || index->nHeight != -1) {
+        LogPrintf("Block-index direct bootstrap: missing/duplicate identity hash=%s\n",
+                  hash.ToString());
+        return nullptr;
+    }
+
+    const BlockIndexId id{index->m_compact_id};
+    const CompactBlockIndexEntry* compact{CompactEntryForId(id)};
+    if (!compact || compact->hash != hash) {
+        LogPrintf("Block-index direct bootstrap: compact metadata identity mismatch id=%u hash=%s\n",
+                  id, hash.ToString());
+        return nullptr;
+    }
+
+    CBlockIndex* parent{nullptr};
+    BlockIndexId parent_id{INVALID_BLOCK_INDEX_ID};
+    if (!diskindex.hashPrev.IsNull()) {
+        parent = LookupBlockIndex(diskindex.hashPrev);
+        if (!parent) {
+            LogPrintf("Block-index direct bootstrap: missing parent identity id=%u prev=%s\n",
+                      id, diskindex.hashPrev.ToString());
+            return nullptr;
+        }
+        parent_id = parent->m_compact_id;
+    }
+
+    const CompactBlockIndexRecord& record{compact->record};
+    const bool metadata_matches{
+        record.parent == parent_id &&
+        record.height == diskindex.nHeight &&
+        record.file == diskindex.StorageFile() &&
+        record.data_pos == diskindex.DataPos() &&
+        record.undo_pos == diskindex.UndoPos() &&
+        record.tx_count == diskindex.nTx &&
+        record.status == diskindex.nStatus &&
+        record.version == diskindex.nVersion &&
+        record.merkle_root == diskindex.MerkleRoot() &&
+        record.time == diskindex.nTime &&
+        record.bits == diskindex.nBits &&
+        record.nonce == diskindex.nNonce &&
+        (!diskindex.HasPersistedChainWork() ||
+         record.chain_work == ArithToUint256(diskindex.nChainWork))};
+
+    if (!metadata_matches) {
+        LogPrintf("Block-index direct bootstrap: canonical/compact metadata mismatch id=%u height=%d hash=%s\n",
+                  id, diskindex.nHeight, hash.ToString());
+        return nullptr;
+    }
+
+    index->pprev = parent;
+    index->pskip = nullptr;
+    index->nHeight = diskindex.nHeight;
+    index->nChainWork = diskindex.HasPersistedChainWork()
+        ? diskindex.nChainWork
+        : arith_uint256{};
+    index->nTx = diskindex.nTx;
+    index->nChainTx = 0;
+    index->nStatus = diskindex.nStatus;
+    index->nVersion = diskindex.nVersion;
+    index->nTime = diskindex.nTime;
+    index->nBits = diskindex.nBits;
+    index->nNonce = diskindex.nNonce;
+    index->nSequenceId = 0;
+    return index;
+}
+
+bool BlockManager::DirectCompactBootstrapComplete() const
+{
+    AssertLockHeld(cs_main);
+
+    if (!m_block_index.DirectCompactBootstrapActive()) return false;
+
+    bool complete{true};
+    m_block_index.ForEach([&](const CBlockIndex& index) {
+        if (index.nHeight < 0) complete = false;
+    });
+    return complete;
+}
+
+void BlockManager::ResetDirectCompactBootstrap()
+{
+    AssertLockHeld(cs_main);
+
+    m_block_index.ResetDirectCompactIdentity();
+    m_compact_block_ids.reset();
+    m_compact_block_delta.reset();
+    m_compact_block_delta_log.reset();
+    m_compact_block_delta_state.reset();
+    m_compact_block_delta_overlay.clear();
+    m_next_compact_id = 0;
 }
 
 bool BlockManager::ActivateCompactBlockIndexIdentityStore(
@@ -2638,8 +2975,48 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
               sizeof(CBlockIndex),
               sizeof(BlockIndexResidentPayload));
 
-    if (!m_block_tree_db->LoadBlockIndexGuts(
-            GetConsensus(), [this](const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return this->InsertBlockIndex(hash); }, m_interrupt)) {
+    const auto legacy_loader =
+        [this](const CDiskBlockIndex& diskindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main) -> CBlockIndex* {
+            CBlockIndex* index{InsertBlockIndex(diskindex.ConstructBlockHash())};
+            if (!index) return nullptr;
+            index->pprev = InsertBlockIndex(diskindex.hashPrev);
+            index->nHeight = diskindex.nHeight;
+            index->StorageFile() = diskindex.StorageFile();
+            index->DataPos() = diskindex.DataPos();
+            index->UndoPos() = diskindex.UndoPos();
+            index->nVersion = diskindex.nVersion;
+            index->MerkleRoot() = diskindex.MerkleRoot();
+            index->nTime = diskindex.nTime;
+            index->nBits = diskindex.nBits;
+            index->nNonce = diskindex.nNonce;
+            index->nStatus = diskindex.nStatus;
+            index->nTx = diskindex.nTx;
+            if (diskindex.HasPersistedChainWork()) {
+                index->nChainWork = diskindex.nChainWork;
+            }
+            return index;
+        };
+
+    bool direct_bootstrap{PrepareDirectCompactBootstrap()};
+    if (direct_bootstrap) {
+        LogPrintf("Block-index direct bootstrap: streaming canonical LevelDB into compact-id shells\n");
+        if (!m_block_tree_db->LoadBlockIndexGuts(
+                GetConsensus(),
+                [this](const CDiskBlockIndex& diskindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+                    return LoadDirectCompactBlockIndexRecord(diskindex);
+                },
+                m_interrupt) ||
+            !DirectCompactBootstrapComplete()) {
+            if (m_interrupt) return false;
+            LogPrintf("Block-index direct bootstrap: canonical verification failed; falling back to legacy identity bootstrap\n");
+            ResetDirectCompactBootstrap();
+            direct_bootstrap = false;
+        }
+    }
+
+    if (!direct_bootstrap &&
+        !m_block_tree_db->LoadBlockIndexGuts(
+            GetConsensus(), legacy_loader, m_interrupt)) {
         return false;
     }
 
@@ -2734,7 +3111,28 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
             chainwork_cache_migration.push_back(pindex);
         }
         const auto chainwork_end{SteadyClock::now()};
-        pindex->TimeMax() = (pindex->pprev ? std::max(pindex->pprev->TimeMax(), pindex->nTime) : pindex->nTime);
+        if (direct_bootstrap) {
+            const CompactBlockIndexEntry* entry{CompactEntryForId(pindex->m_compact_id)};
+            if (!entry) {
+                return error("%s: direct compact metadata missing id=%u", __func__, pindex->m_compact_id);
+            }
+            uint32_t expected_time_max{pindex->nTime};
+            if (pindex->pprev) {
+                const CompactBlockIndexEntry* parent_entry{
+                    CompactEntryForId(pindex->pprev->m_compact_id)};
+                if (!parent_entry) {
+                    return error("%s: direct compact parent metadata missing id=%u",
+                                 __func__, pindex->pprev->m_compact_id);
+                }
+                expected_time_max = std::max(parent_entry->record.time_max, pindex->nTime);
+            }
+            if (entry->record.time_max != expected_time_max) {
+                return error("%s: direct compact time-max mismatch id=%u height=%d",
+                             __func__, pindex->m_compact_id, pindex->nHeight);
+            }
+        } else {
+            pindex->TimeMax() = (pindex->pprev ? std::max(pindex->pprev->TimeMax(), pindex->nTime) : pindex->nTime);
+        }
         const auto timemax_end{SteadyClock::now()};
 
         reconstruction_algo_time += algo_end - algo_start;
@@ -2768,6 +3166,22 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
         }
         if (pindex->pprev) {
             pindex->BuildSkip();
+        }
+
+        if (direct_bootstrap) {
+            const CompactBlockIndexEntry* entry{CompactEntryForId(pindex->m_compact_id)};
+            if (!entry) {
+                return error("%s: direct compact reconstructed metadata missing id=%u",
+                             __func__, pindex->m_compact_id);
+            }
+            const BlockIndexId skip_id{
+                pindex->pskip ? pindex->pskip->m_compact_id : INVALID_BLOCK_INDEX_ID};
+            if (entry->record.skip != skip_id ||
+                entry->record.chain_tx_count != pindex->nChainTx ||
+                entry->record.chain_work != ArithToUint256(pindex->nChainWork)) {
+                return error("%s: direct compact reconstructed state mismatch id=%u height=%d",
+                             __func__, pindex->m_compact_id, pindex->nHeight);
+            }
         }
         reconstruction_linkage_time += SteadyClock::now() - linkage_start;
 
@@ -2804,103 +3218,108 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
     LogPrintf("Startup timing: block-index reconstruction pass: %d entries in %d ms\n",
               nProcessed, Ticks<std::chrono::milliseconds>(SteadyClock::now() - process_start));
 
-    switch (m_opts.block_index_compact_shadow) {
-    case kernel::BlockIndexCompactShadowMode::OFF:
-        AssignCompactIdsDeterministic(vSortedByHeight);
-        break;
-    case kernel::BlockIndexCompactShadowMode::BUILD:
-        AssignCompactIdsDeterministic(vSortedByHeight);
-        if (!BuildCompactBlockIndexShadow(vSortedByHeight) ||
-            !VerifyCompactBlockIndexShadow(vSortedByHeight)) {
-            LogPrintf("Compact block index: shadow build/verify failed; continuing with legacy block index\n");
+    if (!direct_bootstrap) {
+        switch (m_opts.block_index_compact_shadow) {
+        case kernel::BlockIndexCompactShadowMode::OFF:
             AssignCompactIdsDeterministic(vSortedByHeight);
-            m_compact_block_index.reset();
-        }
-        break;
-    case kernel::BlockIndexCompactShadowMode::VERIFY:
-        if (!VerifyCompactBlockIndexShadow(vSortedByHeight)) {
-            LogPrintf("Compact block index: shadow unavailable or incompatible; continuing with legacy block index\n");
+            break;
+        case kernel::BlockIndexCompactShadowMode::BUILD:
             AssignCompactIdsDeterministic(vSortedByHeight);
-            m_compact_block_index.reset();
+            if (!BuildCompactBlockIndexShadow(vSortedByHeight) ||
+                !VerifyCompactBlockIndexShadow(vSortedByHeight)) {
+                LogPrintf("Compact block index: shadow build/verify failed; continuing with legacy block index\n");
+                AssignCompactIdsDeterministic(vSortedByHeight);
+                m_compact_block_index.reset();
+            }
+            break;
+        case kernel::BlockIndexCompactShadowMode::VERIFY:
+            if (!VerifyCompactBlockIndexShadow(vSortedByHeight)) {
+                LogPrintf("Compact block index: shadow unavailable or incompatible; continuing with legacy block index\n");
+                AssignCompactIdsDeterministic(vSortedByHeight);
+                m_compact_block_index.reset();
+            }
+            break;
         }
-        break;
-    }
-
-    switch (m_opts.block_index_compact_ids) {
-    case kernel::BlockIndexCompactIdsMode::OFF:
-        break;
-    case kernel::BlockIndexCompactIdsMode::BUILD:
-        if (!RestoreCompactIds(vSortedByHeight, /*allow_create=*/true)) {
-            LogPrintf("Compact block index: persistent id build/restore failed; continuing with process-local ids\n");
-            AssignCompactIdsDeterministic(vSortedByHeight);
-            m_compact_block_ids.reset();
+    
+        switch (m_opts.block_index_compact_ids) {
+        case kernel::BlockIndexCompactIdsMode::OFF:
+            break;
+        case kernel::BlockIndexCompactIdsMode::BUILD:
+            if (!RestoreCompactIds(vSortedByHeight, /*allow_create=*/true)) {
+                LogPrintf("Compact block index: persistent id build/restore failed; continuing with process-local ids\n");
+                AssignCompactIdsDeterministic(vSortedByHeight);
+                m_compact_block_ids.reset();
+            }
+            break;
+        case kernel::BlockIndexCompactIdsMode::VERIFY:
+            if (!RestoreCompactIds(vSortedByHeight, /*allow_create=*/false)) {
+                LogPrintf("Compact block index: persistent id verification failed; continuing with process-local ids\n");
+                AssignCompactIdsDeterministic(vSortedByHeight);
+                m_compact_block_ids.reset();
+            }
+            break;
         }
-        break;
-    case kernel::BlockIndexCompactIdsMode::VERIFY:
-        if (!RestoreCompactIds(vSortedByHeight, /*allow_create=*/false)) {
-            LogPrintf("Compact block index: persistent id verification failed; continuing with process-local ids\n");
-            AssignCompactIdsDeterministic(vSortedByHeight);
-            m_compact_block_ids.reset();
+    
+        switch (m_opts.block_index_compact_delta) {
+        case kernel::BlockIndexCompactDeltaMode::OFF:
+            break;
+        case kernel::BlockIndexCompactDeltaMode::BUILD:
+            if (!BuildCompactBlockIndexDelta(vSortedByHeight) ||
+                !VerifyCompactBlockIndexDelta()) {
+                LogPrintf("Compact block index: metadata delta build/verify failed; continuing without metadata delta\n");
+                m_compact_block_delta.reset();
+                m_compact_block_delta_log.reset();
+                m_compact_block_delta_state.reset();
+            }
+            break;
+        case kernel::BlockIndexCompactDeltaMode::VERIFY:
+            if (!VerifyCompactBlockIndexDelta()) {
+                LogPrintf("Compact block index: metadata delta verification failed; continuing without metadata delta\n");
+                m_compact_block_delta.reset();
+                m_compact_block_delta_log.reset();
+                m_compact_block_delta_state.reset();
+            }
+            break;
+        case kernel::BlockIndexCompactDeltaMode::COMPACT:
+            if (!VerifyCompactBlockIndexDelta() ||
+                !CompactBlockIndexMetadata() ||
+                !VerifyCompactBlockIndexDelta()) {
+                LogPrintf("Compact block index: metadata compaction/verification failed; continuing without metadata delta\n");
+                m_compact_block_delta.reset();
+                m_compact_block_delta_log.reset();
+                m_compact_block_delta_state.reset();
+            }
+            break;
         }
-        break;
-    }
-
-    switch (m_opts.block_index_compact_delta) {
-    case kernel::BlockIndexCompactDeltaMode::OFF:
-        break;
-    case kernel::BlockIndexCompactDeltaMode::BUILD:
-        if (!BuildCompactBlockIndexDelta(vSortedByHeight) ||
-            !VerifyCompactBlockIndexDelta()) {
-            LogPrintf("Compact block index: metadata delta build/verify failed; continuing without metadata delta\n");
-            m_compact_block_delta.reset();
-            m_compact_block_delta_log.reset();
-            m_compact_block_delta_state.reset();
+    
+        switch (m_opts.block_index_compact_lookup) {
+        case kernel::BlockIndexCompactLookupMode::OFF:
+            break;
+        case kernel::BlockIndexCompactLookupMode::BUILD:
+            if (!BuildCompactBlockIndexLookup() ||
+                !VerifyCompactBlockIndexLookup()) {
+                LogPrintf("Compact block index: lookup build/verify failed; continuing without compact lookup\n");
+                m_compact_block_lookup.reset();
+            }
+            break;
+        case kernel::BlockIndexCompactLookupMode::VERIFY:
+            if (!VerifyCompactBlockIndexLookup()) {
+                LogPrintf("Compact block index: lookup unavailable or incompatible; continuing without compact lookup\n");
+                m_compact_block_lookup.reset();
+            }
+            break;
         }
-        break;
-    case kernel::BlockIndexCompactDeltaMode::VERIFY:
-        if (!VerifyCompactBlockIndexDelta()) {
-            LogPrintf("Compact block index: metadata delta verification failed; continuing without metadata delta\n");
-            m_compact_block_delta.reset();
-            m_compact_block_delta_log.reset();
-            m_compact_block_delta_state.reset();
+    
+        // BALANCED/LOWMEM can now release the 24M-node legacy hash map while
+        // preserving stable CBlockIndex* shells in dense compact-id order. If the
+        // derived compact lookup is unavailable we deliberately retain the legacy
+        // representation and continue normally.
+        if (!ActivateCompactBlockIndexIdentityStore(vSortedByHeight)) {
+            return false;
         }
-        break;
-    case kernel::BlockIndexCompactDeltaMode::COMPACT:
-        if (!VerifyCompactBlockIndexDelta() ||
-            !CompactBlockIndexMetadata() ||
-            !VerifyCompactBlockIndexDelta()) {
-            LogPrintf("Compact block index: metadata compaction/verification failed; continuing without metadata delta\n");
-            m_compact_block_delta.reset();
-            m_compact_block_delta_log.reset();
-            m_compact_block_delta_state.reset();
-        }
-        break;
-    }
-
-    switch (m_opts.block_index_compact_lookup) {
-    case kernel::BlockIndexCompactLookupMode::OFF:
-        break;
-    case kernel::BlockIndexCompactLookupMode::BUILD:
-        if (!BuildCompactBlockIndexLookup() ||
-            !VerifyCompactBlockIndexLookup()) {
-            LogPrintf("Compact block index: lookup build/verify failed; continuing without compact lookup\n");
-            m_compact_block_lookup.reset();
-        }
-        break;
-    case kernel::BlockIndexCompactLookupMode::VERIFY:
-        if (!VerifyCompactBlockIndexLookup()) {
-            LogPrintf("Compact block index: lookup unavailable or incompatible; continuing without compact lookup\n");
-            m_compact_block_lookup.reset();
-        }
-        break;
-    }
-
-    // BALANCED/LOWMEM can now release the 24M-node legacy hash map while
-    // preserving stable CBlockIndex* shells in dense compact-id order. If the
-    // derived compact lookup is unavailable we deliberately retain the legacy
-    // representation and continue normally.
-    if (!ActivateCompactBlockIndexIdentityStore(vSortedByHeight)) {
-        return false;
+    } else {
+        LogPrintf("Block-index direct bootstrap: canonical LevelDB and reconstructed compact metadata verified entries=%u\n",
+                  vSortedByHeight.size());
     }
 
     // ChainstateManager immediately needs to traverse every loaded index to
@@ -3023,11 +3442,26 @@ bool BlockManager::LoadBlockIndexDB(const std::optional<uint256>& snapshot_block
     // Check presence of blk files
     LogPrintf("Checking all blk files are present...\n");
     std::set<int> setBlkDataFiles;
+    bool block_file_metadata_ok{true};
     m_block_index.ForEach([&](const CBlockIndex& block_index) {
-        if (block_index.nStatus & BLOCK_HAVE_DATA) {
-            setBlkDataFiles.insert(block_index.StorageFile());
+        if (!(block_index.nStatus & BLOCK_HAVE_DATA)) return;
+
+        if (m_block_index.DirectCompactBootstrapActive() &&
+            !block_index.HasResidentPayload()) {
+            BlockIndexResidentPayload payload;
+            if (!LoadCompactBlockIndexPayload(block_index, payload)) {
+                block_file_metadata_ok = false;
+                return;
+            }
+            setBlkDataFiles.insert(payload.nFile);
+            return;
         }
+
+        setBlkDataFiles.insert(block_index.StorageFile());
     });
+    if (!block_file_metadata_ok) {
+        return error("%s: direct compact block-file metadata lookup failed", __func__);
+    }
     for (std::set<int>::iterator it = setBlkDataFiles.begin(); it != setBlkDataFiles.end(); it++) {
         FlatFilePos pos(*it, 0);
         if (OpenBlockFile(pos, true).IsNull()) {

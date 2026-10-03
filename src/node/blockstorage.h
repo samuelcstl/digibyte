@@ -68,7 +68,8 @@ public:
     void ReadReindexing(bool& fReindexing);
     bool WriteFlag(const std::string& name, bool fValue);
     bool ReadFlag(const std::string& name, bool& fValue);
-    bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
+    using BlockIndexLoader = std::function<CBlockIndex*(const CDiskBlockIndex&)>;
+    bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, BlockIndexLoader loadBlockIndex, const util::SignalInterrupt& interrupt)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 };
 } // namespace kernel
@@ -1338,6 +1339,12 @@ public:
     std::vector<CBlockIndex*> GetAllBlockIndices() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     std::vector<CBlockIndex*> GetAllBlockIndicesByCompactId() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     std::vector<CBlockIndex*> TakeStartupBlockIndexView() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    const CompactBlockIndexEntry* CompactEntryForId(BlockIndexId id) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool PrepareDirectCompactMetadataBacking() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool PrepareDirectCompactBootstrap() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    CBlockIndex* LoadDirectCompactBlockIndexRecord(const CDiskBlockIndex& diskindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool DirectCompactBootstrapComplete() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void ResetDirectCompactBootstrap() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ActivateCompactBlockIndexIdentityStore(std::vector<CBlockIndex*>& startup_view) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ActivateBlockIndexPayloadCache(CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
