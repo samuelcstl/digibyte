@@ -920,13 +920,27 @@ BOOST_AUTO_TEST_CASE(block_index_store_compact_identity_cutover)
     BOOST_CHECK_EQUAL(store.ByCompactId(0), new_a);
     BOOST_CHECK_EQUAL(store.ByCompactId(2), new_c);
 
-    // Immutable-base lookup is supplied by BlockManager's compact lookup.
+    // Immutable-base lookup is supplied by BlockManager's compact lookup until
+    // the payload hot window is activated.
     BOOST_CHECK(store.Lookup(hashes[0]) == nullptr);
     // Tail/live identity remains exact and fully resident.
     BOOST_CHECK_EQUAL(store.Lookup(hashes[2]), new_c);
 
-    store.UpdateHotWindow(new_b);
-    // Once the hot front is built, recent immutable identities are resident.
+    std::array<BlockIndexResidentPayload, 3> backing{
+        new_a->ResidentPayload(),
+        new_b->ResidentPayload(),
+        new_c->ResidentPayload()};
+
+    BOOST_REQUIRE(store.ActivatePayloadCache(
+        new_b,
+        [&](const CBlockIndex& index, BlockIndexResidentPayload& payload) {
+            BOOST_REQUIRE(index.m_compact_id < backing.size());
+            payload = backing[index.m_compact_id];
+            return true;
+        }));
+
+    // Once the hot payload window is active, recent immutable identities have
+    // an exact resident front and avoid mapped lookup on the hot path.
     BOOST_CHECK_EQUAL(store.Lookup(hashes[0]), new_a);
     BOOST_CHECK_EQUAL(store.Lookup(hashes[1]), new_b);
 }

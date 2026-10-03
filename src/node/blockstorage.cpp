@@ -2442,6 +2442,9 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     auto [pindexNew, inserted] = m_block_index.Insert(block.GetHash(), block);
     Assert(inserted);
     pindexNew->m_compact_id = AllocateCompactId();
+    if (m_block_index.CompactIdentityActive()) {
+        Assert(m_block_index.ByCompactId(pindexNew->m_compact_id) == pindexNew);
+    }
 
     // We assign the sequence id to blocks only when the full data is available,
     // to avoid miners withholding blocks but broadcasting headers, to get a
@@ -2620,8 +2623,12 @@ CBlockIndex* BlockManager::InsertBlockIndex(const uint256& hash)
         return nullptr;
     }
 
+    if (CBlockIndex* existing{LookupBlockIndex(hash)}) {
+        return existing;
+    }
+
     auto [pindex, inserted]{m_block_index.Insert(hash)};
-    (void)inserted;
+    Assert(inserted);
     return pindex;
 }
 

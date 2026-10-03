@@ -441,6 +441,23 @@ public:
                 source->HasResidentAlgoHistory()) {
                 return false;
             }
+
+            if (source->pprev) {
+                const BlockIndexId parent_id{source->pprev->m_compact_id};
+                if (parent_id == INVALID_BLOCK_INDEX_ID ||
+                    static_cast<size_t>(parent_id) >= by_id.size() ||
+                    by_id[parent_id] != source->pprev) {
+                    return false;
+                }
+            }
+            if (source->pskip) {
+                const BlockIndexId skip_id{source->pskip->m_compact_id};
+                if (skip_id == INVALID_BLOCK_INDEX_ID ||
+                    static_cast<size_t>(skip_id) >= by_id.size() ||
+                    by_id[skip_id] != source->pskip) {
+                    return false;
+                }
+            }
         }
 
         m_compact_identities.clear();
@@ -448,6 +465,14 @@ public:
         m_hot_identity_index.clear();
         m_live_identity_index.reserve(
             std::max<size_t>(16, (by_id.size() - immutable_count) * 2));
+
+        const auto abort_preparation = [this]() {
+            m_compact_identities.clear();
+            m_live_identity_index.clear();
+            m_hot_identity_index.clear();
+            m_immutable_identity_count = 0;
+            m_compact_identity_prepared = false;
+        };
 
         for (size_t raw_id = 0; raw_id < by_id.size(); ++raw_id) {
             const auto id{static_cast<BlockIndexId>(raw_id)};
@@ -473,8 +498,7 @@ public:
             if (raw_id < immutable_count) {
                 const uint256* hash{immutable_hash(id)};
                 if (!hash || *hash != source.GetBlockHash()) {
-                    m_compact_identities.clear();
-                    m_live_identity_index.clear();
+                    abort_preparation();
                     return false;
                 }
                 dest.phashBlock = hash;
@@ -482,8 +506,7 @@ public:
                 auto [it, inserted]{
                     m_live_identity_index.emplace(source.GetBlockHash(), &dest)};
                 if (!inserted) {
-                    m_compact_identities.clear();
-                    m_live_identity_index.clear();
+                    abort_preparation();
                     return false;
                 }
                 dest.phashBlock = &it->first;
@@ -496,18 +519,14 @@ public:
 
             if (source.pprev) {
                 const BlockIndexId parent_id{source.pprev->m_compact_id};
-                if (parent_id == INVALID_BLOCK_INDEX_ID ||
-                    parent_id >= m_compact_identities.size()) {
-                    return false;
-                }
+                assert(parent_id != INVALID_BLOCK_INDEX_ID);
+                assert(static_cast<size_t>(parent_id) < m_compact_identities.size());
                 dest.pprev = &m_compact_identities.at(parent_id);
             }
             if (source.pskip) {
                 const BlockIndexId skip_id{source.pskip->m_compact_id};
-                if (skip_id == INVALID_BLOCK_INDEX_ID ||
-                    skip_id >= m_compact_identities.size()) {
-                    return false;
-                }
+                assert(skip_id != INVALID_BLOCK_INDEX_ID);
+                assert(static_cast<size_t>(skip_id) < m_compact_identities.size());
                 dest.pskip = &m_compact_identities.at(skip_id);
             }
         }
