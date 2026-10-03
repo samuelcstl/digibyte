@@ -2499,6 +2499,15 @@ bool BlockManager::PrepareDirectCompactBootstrap()
         return false;
     }
 
+    // Make even unexpected pre-cache payload access correct. Direct shells have
+    // no eager payload, so any accessor before LoadChainTip must read the
+    // already-validated compact backing rather than manufacturing zeroes.
+    m_block_index.SetPayloadLoader(
+        [this](const CBlockIndex& index, BlockIndexResidentPayload& payload) {
+            AssertLockHeld(cs_main);
+            return LoadCompactBlockIndexPayload(index, payload);
+        });
+
     LogPrintf("Block-index direct bootstrap: activated empty dense shells=%u immutable=%u live_tail=%u shell_bytes=%u in %d ms\n",
               m_block_index.size(),
               base_entry_count,

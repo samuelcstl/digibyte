@@ -504,6 +504,7 @@ public:
         m_immutable_identity_count = 0;
         m_direct_identity_bootstrap = false;
         m_compact_identity_active = false;
+        m_payload_loader = {};
     }
 
     [[nodiscard]] bool DirectCompactBootstrapActive() const noexcept
@@ -682,6 +683,11 @@ public:
     BlockMap& RawMap() noexcept { return m_entries; }
     const BlockMap& RawMap() const noexcept { return m_entries; }
 
+    void SetPayloadLoader(PayloadLoader loader)
+    {
+        m_payload_loader = std::move(loader);
+    }
+
     [[nodiscard]] BlockIndexResidencyMode GetMode() const noexcept { return m_mode; }
     [[nodiscard]] size_t GetHotDepth() const noexcept { return m_hot_depth; }
     [[nodiscard]] BlockIndexResidencyStats GetResidencyStats() const noexcept { return m_stats; }
@@ -732,7 +738,17 @@ public:
         index.SetPayloadProvider(this);
 
         if (!m_cache_active) {
-            return CreateEmptyPayload(index);
+            BlockIndexResidentPayload& payload{CreateEmptyPayload(index)};
+            if (m_direct_identity_bootstrap) {
+                if (!m_payload_loader) {
+                    throw std::runtime_error("direct block-index bootstrap payload loader unavailable");
+                }
+                RecordBackingRead();
+                if (!m_payload_loader(index, payload)) {
+                    throw std::runtime_error("direct block-index bootstrap payload materialization failed");
+                }
+            }
+            return payload;
         }
 
         if (!m_payload_loader) {

@@ -897,6 +897,26 @@ BOOST_AUTO_TEST_CASE(block_index_store_direct_compact_identity_bootstrap)
     BOOST_CHECK_EQUAL(store.Lookup(hashes[2]), c);
     BOOST_CHECK_EQUAL(store.Lookup(hashes[3]), d);
 
+    std::array<BlockIndexResidentPayload, 4> backing{};
+    backing[0].nFile = 10;
+    backing[1].nFile = 11;
+    backing[2].nFile = 12;
+    backing[3].nFile = 13;
+
+    size_t loads{0};
+    store.SetPayloadLoader(
+        [&](const CBlockIndex& index, BlockIndexResidentPayload& payload) {
+            BOOST_REQUIRE(index.m_compact_id < backing.size());
+            payload = backing[index.m_compact_id];
+            ++loads;
+            return true;
+        });
+
+    // An unexpected accessor before cache activation must lazily load correct
+    // backing data, not create an empty bootstrap payload.
+    BOOST_CHECK_EQUAL(c->StorageFile(), 12);
+    BOOST_CHECK_EQUAL(loads, 1U);
+
     a->nHeight = 0;
     b->nHeight = 1;
     c->nHeight = 2;
@@ -905,13 +925,6 @@ BOOST_AUTO_TEST_CASE(block_index_store_direct_compact_identity_bootstrap)
     c->pprev = b;
     d->pprev = c;
 
-    std::array<BlockIndexResidentPayload, 4> backing{};
-    backing[0].nFile = 10;
-    backing[1].nFile = 11;
-    backing[2].nFile = 12;
-    backing[3].nFile = 13;
-
-    size_t loads{0};
     BOOST_REQUIRE(store.ActivatePayloadCache(
         d,
         [&](const CBlockIndex& index, BlockIndexResidentPayload& payload) {
@@ -921,8 +934,8 @@ BOOST_AUTO_TEST_CASE(block_index_store_direct_compact_identity_bootstrap)
             return true;
         }));
 
-    // Direct bootstrap had no eager payloads. Cache activation loaded only the
-    // two-block hot window.
+    // C was already lazily materialized by the deliberate pre-cache access;
+    // activation reuses it and loads only D from backing.
     BOOST_CHECK_EQUAL(loads, 2U);
     BOOST_CHECK_EQUAL(store.ResidentPayloads(), 2U);
     BOOST_CHECK(!a->HasResidentPayload());
