@@ -144,6 +144,18 @@ class BlockIndexStore : public BlockIndexPayloadProvider
             return m_chunks.back()[(m_size - 1) % CHUNK_ELEMENTS];
         }
 
+        T& at(size_t index)
+        {
+            assert(index < m_size);
+            return m_chunks[index / CHUNK_ELEMENTS][index % CHUNK_ELEMENTS];
+        }
+
+        const T& at(size_t index) const
+        {
+            assert(index < m_size);
+            return m_chunks[index / CHUNK_ELEMENTS][index % CHUNK_ELEMENTS];
+        }
+
         [[nodiscard]] size_t size() const noexcept { return m_size; }
 
         void clear()
@@ -230,8 +242,15 @@ public:
     const_iterator end() const noexcept { return m_entries.end(); }
     const_iterator cend() const noexcept { return m_entries.cend(); }
 
-    [[nodiscard]] bool empty() const noexcept { return m_entries.empty(); }
-    [[nodiscard]] size_type size() const noexcept { return m_entries.size(); }
+    [[nodiscard]] bool empty() const noexcept
+    {
+        return m_compact_identity_active ? m_compact_identities.size() == 0 : m_entries.empty();
+    }
+
+    [[nodiscard]] size_type size() const noexcept
+    {
+        return m_compact_identity_active ? m_compact_identities.size() : m_entries.size();
+    }
 
     iterator find(const uint256& hash)
     {
@@ -298,12 +317,38 @@ public:
     // ownership without changing validation semantics.
     CBlockIndex* Lookup(const uint256& hash)
     {
+        if (m_compact_identity_active) {
+            if (auto it{m_live_identity_index.find(hash)}; it != m_live_identity_index.end()) {
+                NoteLookup(true);
+                return it->second;
+            }
+            if (auto it{m_hot_identity_index.find(hash)}; it != m_hot_identity_index.end()) {
+                NoteLookup(true);
+                return it->second;
+            }
+            NoteLookup(false);
+            return nullptr;
+        }
+
         auto it{find(hash)};
         return it == end() ? nullptr : &it->second;
     }
 
     const CBlockIndex* Lookup(const uint256& hash) const
     {
+        if (m_compact_identity_active) {
+            if (auto it{m_live_identity_index.find(hash)}; it != m_live_identity_index.end()) {
+                NoteLookup(true);
+                return it->second;
+            }
+            if (auto it{m_hot_identity_index.find(hash)}; it != m_hot_identity_index.end()) {
+                NoteLookup(true);
+                return it->second;
+            }
+            NoteLookup(false);
+            return nullptr;
+        }
+
         auto it{find(hash)};
         return it == end() ? nullptr : &it->second;
     }
@@ -315,26 +360,208 @@ public:
 
     std::pair<CBlockIndex*, bool> Insert(const uint256& hash)
     {
-        auto [it, inserted]{try_emplace(hash)};
-        return {&it->second, inserted};
+        if (!m_compact_identity_active) {
+            auto [it, inserted]{try_emplace(hash)};
+            if (inserted) it->second.phashBlock = &it->first;
+            return {&it->second, inserted};
+        }
+
+        if (CBlockIndex* existing{Lookup(hash)}) return {existing, false};
+
+        CBlockIndex& index{m_compact_identities.emplace_back()};
+        InitializeStoreEntry(index);
+        auto [it, inserted]{m_live_identity_index.emplace(hash, &index)};
+        assert(inserted);
+        index.phashBlock = &it->first;
+        ++m_stats.insertions;
+        return {&index, true};
     }
 
     std::pair<CBlockIndex*, bool> Insert(const uint256& hash, const CBlockHeader& block)
     {
-        auto [it, inserted]{try_emplace(hash, block)};
-        return {&it->second, inserted};
+        auto [index, inserted]{Insert(hash)};
+        if (inserted) {
+            index->nVersion = block.nVersion;
+            index->nTime = block.nTime;
+            index->nBits = block.nBits;
+            index->nNonce = block.nNonce;
+            MaterializeBlockIndexPayload(*index).hashMerkleRoot = block.hashMerkleRoot;
+        }
+        return {index, inserted};
     }
 
     template <typename Fn>
     void ForEach(Fn&& fn)
     {
+        if (m_compact_identity_active) {
+            for (size_t i = 0; i < m_compact_identities.size(); ++i) {
+                fn(m_compact_identities.at(i));
+            }
+            return;
+        }
         for (auto& [_, index] : m_entries) fn(index);
     }
 
     template <typename Fn>
     void ForEach(Fn&& fn) const
     {
+        if (m_compact_identity_active) {
+            for (size_t i = 0; i < m_compact_identities.size(); ++i) {
+                fn(m_compact_identities.at(i));
+            }
+            return;
+        }
         for (const auto& [_, index] : m_entries) fn(index);
+    }
+
+    using IdentityHashResolver = std::function<const uint256*(BlockIndexId)>;
+
+    bool PrepareCompactIdentityCutover(
+        const std::vector<CBlockIndex*>& by_id,
+        size_t immutable_count,
+        const IdentityHashResolver& immutable_hash)
+    {
+        if (m_mode == BlockIndexResidencyMode::FULL ||
+            m_compact_identity_active ||
+            m_compact_identity_prepared ||
+            !immutable_hash ||
+            by_id.size() != m_entries.size() ||
+            immutable_count > by_id.size()) {
+            return false;
+        }
+
+        // BALANCED/LOWMEM bootstrap deliberately has no historical algo-history
+        // accelerators yet. Those are rebuilt only for the hot window after the
+        // payload cache cut-over, so no old CBlockIndex* may be hidden inside a
+        // payload while identity pointers are being remapped.
+        for (size_t id = 0; id < by_id.size(); ++id) {
+            const CBlockIndex* source{by_id[id]};
+            if (!source ||
+                source->m_compact_id != id ||
+                source->HasResidentAlgoHistory()) {
+                return false;
+            }
+        }
+
+        m_compact_identities.clear();
+        m_live_identity_index.clear();
+        m_hot_identity_index.clear();
+        m_live_identity_index.reserve(
+            std::max<size_t>(16, (by_id.size() - immutable_count) * 2));
+
+        for (size_t raw_id = 0; raw_id < by_id.size(); ++raw_id) {
+            const auto id{static_cast<BlockIndexId>(raw_id)};
+            const CBlockIndex& source{*by_id[raw_id]};
+            CBlockIndex& dest{m_compact_identities.emplace_back()};
+
+            dest.nHeight = source.nHeight;
+            dest.nChainWork = source.nChainWork;
+            dest.nTx = source.nTx;
+            dest.nChainTx = source.nChainTx;
+            dest.nStatus = source.nStatus;
+            dest.nVersion = source.nVersion;
+            dest.nTime = source.nTime;
+            dest.nBits = source.nBits;
+            dest.nNonce = source.nNonce;
+            dest.nSequenceId = source.nSequenceId;
+            dest.m_compact_id = source.m_compact_id;
+            dest.SetPayloadProvider(this);
+            if (source.m_resident_payload) {
+                dest.AttachResidentPayload(source.m_resident_payload);
+            }
+
+            if (raw_id < immutable_count) {
+                const uint256* hash{immutable_hash(id)};
+                if (!hash || *hash != source.GetBlockHash()) {
+                    m_compact_identities.clear();
+                    m_live_identity_index.clear();
+                    return false;
+                }
+                dest.phashBlock = hash;
+            } else {
+                auto [it, inserted]{
+                    m_live_identity_index.emplace(source.GetBlockHash(), &dest)};
+                if (!inserted) {
+                    m_compact_identities.clear();
+                    m_live_identity_index.clear();
+                    return false;
+                }
+                dest.phashBlock = &it->first;
+            }
+        }
+
+        for (size_t raw_id = 0; raw_id < by_id.size(); ++raw_id) {
+            const CBlockIndex& source{*by_id[raw_id]};
+            CBlockIndex& dest{m_compact_identities.at(raw_id)};
+
+            if (source.pprev) {
+                const BlockIndexId parent_id{source.pprev->m_compact_id};
+                if (parent_id == INVALID_BLOCK_INDEX_ID ||
+                    parent_id >= m_compact_identities.size()) {
+                    return false;
+                }
+                dest.pprev = &m_compact_identities.at(parent_id);
+            }
+            if (source.pskip) {
+                const BlockIndexId skip_id{source.pskip->m_compact_id};
+                if (skip_id == INVALID_BLOCK_INDEX_ID ||
+                    skip_id >= m_compact_identities.size()) {
+                    return false;
+                }
+                dest.pskip = &m_compact_identities.at(skip_id);
+            }
+        }
+
+        m_immutable_identity_count = immutable_count;
+        m_compact_identity_prepared = true;
+        return true;
+    }
+
+    CBlockIndex* RemapPreparedIdentity(const CBlockIndex* index)
+    {
+        if (!index) return nullptr;
+        assert(m_compact_identity_prepared);
+        const BlockIndexId id{index->m_compact_id};
+        assert(id != INVALID_BLOCK_INDEX_ID);
+        assert(static_cast<size_t>(id) < m_compact_identities.size());
+        return &m_compact_identities.at(id);
+    }
+
+    void CommitCompactIdentityCutover()
+    {
+        assert(m_compact_identity_prepared);
+        BlockMap empty;
+        m_entries.swap(empty);
+        m_compact_identity_active = true;
+        m_compact_identity_prepared = false;
+    }
+
+    [[nodiscard]] bool CompactIdentityActive() const noexcept
+    {
+        return m_compact_identity_active;
+    }
+
+    [[nodiscard]] size_t ImmutableIdentityCount() const noexcept
+    {
+        return m_immutable_identity_count;
+    }
+
+    CBlockIndex* ByCompactId(BlockIndexId id)
+    {
+        if (!m_compact_identity_active ||
+            static_cast<size_t>(id) >= m_compact_identities.size()) {
+            return nullptr;
+        }
+        return &m_compact_identities.at(id);
+    }
+
+    const CBlockIndex* ByCompactId(BlockIndexId id) const
+    {
+        if (!m_compact_identity_active ||
+            static_cast<size_t>(id) >= m_compact_identities.size()) {
+            return nullptr;
+        }
+        return &m_compact_identities.at(id);
     }
 
     BlockMap& RawMap() noexcept { return m_entries; }
@@ -471,16 +698,28 @@ public:
         if (m_hot_depth == 0 || !tip) {
             for (CBlockIndex* index : m_hot_window) ReleasePayloadPin(*index);
             m_hot_window.clear();
+            m_hot_identity_index.clear();
             return;
         }
-        if (!m_hot_window.empty() && m_hot_window.back() == tip) return;
+        if (!m_hot_window.empty() && m_hot_window.back() == tip) {
+            if (m_compact_identity_active && m_hot_identity_index.empty()) {
+                RebuildHotIdentityIndex();
+            }
+            return;
+        }
 
         if (!m_hot_window.empty() && tip->pprev == m_hot_window.back()) {
             PinPayload(*tip);
             m_hot_window.push_back(tip);
+            if (m_compact_identity_active) {
+                m_hot_identity_index[tip->GetBlockHash()] = tip;
+            }
             while (m_hot_window.size() > m_hot_depth) {
                 CBlockIndex* old{m_hot_window.front()};
                 m_hot_window.pop_front();
+                if (m_compact_identity_active) {
+                    m_hot_identity_index.erase(old->GetBlockHash());
+                }
                 ReleasePayloadPin(*old);
             }
             return;
@@ -498,6 +737,7 @@ public:
             PinPayload(**it);
             m_hot_window.push_back(*it);
         }
+        RebuildHotIdentityIndex();
 
         // A cold historical branch can become active after its cached algo
         // accelerators have been reclaimed. Rebuild only on this uncommon
@@ -526,7 +766,7 @@ public:
             hot.emplace_back(index, *index->m_resident_payload);
         }
 
-        for (auto& [_, index] : m_entries) index.ClearResidentPayload();
+        ForEach([](CBlockIndex& index) { index.ClearResidentPayload(); });
         m_bootstrap_payloads.clear();
         m_payload_cache_lru.clear();
         m_payload_cache_index.clear();
@@ -545,6 +785,7 @@ public:
             ++m_payload_pins[it->first];
             m_hot_window.push_back(it->first);
         }
+        RebuildHotIdentityIndex();
         return true;
     }
 
@@ -595,6 +836,16 @@ private:
         CBlockIndex* index{nullptr};
         BlockIndexResidentPayload payload{};
     };
+
+    void RebuildHotIdentityIndex()
+    {
+        if (!m_compact_identity_active) return;
+        m_hot_identity_index.clear();
+        m_hot_identity_index.reserve(m_hot_window.size() * 2 + 1);
+        for (CBlockIndex* index : m_hot_window) {
+            m_hot_identity_index.emplace(index->GetBlockHash(), index);
+        }
+    }
 
     size_t MaxCachedPayloads() const noexcept
     {
@@ -673,6 +924,19 @@ private:
     }
 
     BlockMap m_entries;
+
+    // BALANCED/LOWMEM identity ownership after startup migration. The arena is
+    // dense in BlockIndexId order. Immutable-base hashes remain owned by the
+    // mapped compact store; only the small mutable/live tail is duplicated in
+    // an in-memory exact index so delta checkpoint swaps cannot invalidate
+    // phashBlock pointers.
+    StableArena<CBlockIndex> m_compact_identities;
+    std::unordered_map<uint256, CBlockIndex*, BlockHasher> m_live_identity_index;
+    std::unordered_map<uint256, CBlockIndex*, BlockHasher> m_hot_identity_index;
+    size_t m_immutable_identity_count{0};
+    bool m_compact_identity_prepared{false};
+    bool m_compact_identity_active{false};
+
     BlockIndexResidencyMode m_mode{BlockIndexResidencyMode::FULL};
     size_t m_hot_depth{kernel::DEFAULT_BLOCK_INDEX_HOT_DEPTH};
     size_t m_cache_limit_bytes{kernel::DEFAULT_BLOCK_INDEX_CACHE_MIB_BALANCED * 1024 * 1024};
@@ -955,6 +1219,7 @@ public:
     std::vector<CBlockIndex*> GetAllBlockIndices() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     std::vector<CBlockIndex*> GetAllBlockIndicesByCompactId() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     std::vector<CBlockIndex*> TakeStartupBlockIndexView() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool ActivateCompactBlockIndexIdentityStore(std::vector<CBlockIndex*>& startup_view) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ActivateBlockIndexPayloadCache(CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**

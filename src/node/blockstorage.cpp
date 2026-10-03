@@ -2270,6 +2270,89 @@ bool BlockManager::LoadCompactBlockIndexPayload(
     return true;
 }
 
+bool BlockManager::ActivateCompactBlockIndexIdentityStore(
+    std::vector<CBlockIndex*>& startup_view)
+{
+    AssertLockHeld(cs_main);
+
+    if (m_block_index.GetMode() == BlockIndexResidencyMode::FULL) return true;
+    if (m_block_index.CompactIdentityActive()) return true;
+
+    if (!m_compact_block_index || !m_compact_block_index->IsOpen()) {
+        LogPrintf("Block-index identity: compact base unavailable; retaining legacy unordered_map ownership\n");
+        return true;
+    }
+
+    if (!m_compact_block_lookup || !m_compact_block_lookup->IsOpen()) {
+        auto lookup = std::make_unique<CompactBlockIndexLookup>();
+        std::string error;
+        const fs::path path{CompactBlockIndexLookupPath()};
+        if (!lookup->Open(path, *m_compact_block_index, error)) {
+            LogPrintf("Block-index identity: compact lookup unavailable (%s); retaining legacy unordered_map ownership\n",
+                      error);
+            return true;
+        }
+        m_compact_block_lookup = std::move(lookup);
+    }
+
+    if (!m_compact_block_lookup->HasResidentProbeFront()) {
+        std::string error;
+        const auto front_start{SteadyClock::now()};
+        if (!m_compact_block_lookup->LoadResidentProbeFront(error)) {
+            LogPrintf("Block-index identity: resident lookup front unavailable (%s); retaining legacy unordered_map ownership\n",
+                      error);
+            return true;
+        }
+        LogPrintf("Block-index identity: loaded resident lookup front bytes=%u in %d ms\n",
+                  m_compact_block_lookup->ResidentProbeFrontBytes(),
+                  Ticks<std::chrono::milliseconds>(SteadyClock::now() - front_start));
+    }
+
+    const auto start{SteadyClock::now()};
+    std::vector<CBlockIndex*> by_id{GetAllBlockIndicesByCompactId()};
+    const size_t immutable_count{
+        static_cast<size_t>(m_compact_block_index->EntryCount())};
+
+    if (!m_block_index.PrepareCompactIdentityCutover(
+            by_id,
+            immutable_count,
+            [this](BlockIndexId id) -> const uint256* {
+                const CompactBlockIndexEntry* entry{m_compact_block_index->Get(id)};
+                return entry ? &entry->hash : nullptr;
+            })) {
+        LogPrintf("Block-index identity: dense-shell preparation failed; retaining legacy unordered_map ownership\n");
+        return true;
+    }
+
+    for (CBlockIndex*& index : startup_view) {
+        index = m_block_index.RemapPreparedIdentity(index);
+    }
+
+    std::multimap<CBlockIndex*, CBlockIndex*> remapped_unlinked;
+    for (const auto& [parent, child] : m_blocks_unlinked) {
+        remapped_unlinked.emplace(
+            m_block_index.RemapPreparedIdentity(parent),
+            m_block_index.RemapPreparedIdentity(child));
+    }
+
+    std::set<CBlockIndex*> remapped_dirty;
+    for (CBlockIndex* index : m_dirty_blockindex) {
+        remapped_dirty.insert(m_block_index.RemapPreparedIdentity(index));
+    }
+
+    m_blocks_unlinked.swap(remapped_unlinked);
+    m_dirty_blockindex.swap(remapped_dirty);
+    m_block_index.CommitCompactIdentityCutover();
+
+    LogPrintf("Block-index identity: activated dense compact-id shells=%u immutable=%u live_tail=%u shell_bytes=%u in %d ms\n",
+              m_block_index.size(),
+              immutable_count,
+              m_block_index.size() - immutable_count,
+              static_cast<uint64_t>(m_block_index.size()) * sizeof(CBlockIndex),
+              Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
+    return true;
+}
+
 bool BlockManager::ActivateBlockIndexPayloadCache(CBlockIndex* tip)
 {
     AssertLockHeld(cs_main);
@@ -2309,23 +2392,55 @@ bool BlockManager::ActivateBlockIndexPayloadCache(CBlockIndex* tip)
 CBlockIndex* BlockManager::LookupBlockIndex(const uint256& hash)
 {
     AssertLockHeld(cs_main);
-    return m_block_index.Lookup(hash);
+
+    if (CBlockIndex* resident{m_block_index.Lookup(hash)}) return resident;
+
+    if (m_block_index.CompactIdentityActive() &&
+        m_compact_block_lookup && m_compact_block_lookup->IsOpen() &&
+        m_compact_block_index && m_compact_block_index->IsOpen()) {
+        const auto found{
+            m_compact_block_lookup->HasResidentProbeFront()
+                ? m_compact_block_lookup->FindResident(hash, *m_compact_block_index)
+                : m_compact_block_lookup->Find(hash, *m_compact_block_index)};
+        if (found &&
+            static_cast<size_t>(*found) < m_block_index.ImmutableIdentityCount()) {
+            return m_block_index.ByCompactId(*found);
+        }
+    }
+    return nullptr;
 }
 
 const CBlockIndex* BlockManager::LookupBlockIndex(const uint256& hash) const
 {
     AssertLockHeld(cs_main);
-    return m_block_index.Lookup(hash);
+
+    if (const CBlockIndex* resident{m_block_index.Lookup(hash)}) return resident;
+
+    if (m_block_index.CompactIdentityActive() &&
+        m_compact_block_lookup && m_compact_block_lookup->IsOpen() &&
+        m_compact_block_index && m_compact_block_index->IsOpen()) {
+        const auto found{
+            m_compact_block_lookup->HasResidentProbeFront()
+                ? m_compact_block_lookup->FindResident(hash, *m_compact_block_index)
+                : m_compact_block_lookup->Find(hash, *m_compact_block_index)};
+        if (found &&
+            static_cast<size_t>(*found) < m_block_index.ImmutableIdentityCount()) {
+            return m_block_index.ByCompactId(*found);
+        }
+    }
+    return nullptr;
 }
 
 CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockIndex*& best_header)
 {
     AssertLockHeld(cs_main);
 
-    auto [pindexNew, inserted] = m_block_index.Insert(block.GetHash(), block);
-    if (!inserted) {
-        return pindexNew;
+    if (CBlockIndex* existing{LookupBlockIndex(block.GetHash())}) {
+        return existing;
     }
+
+    auto [pindexNew, inserted] = m_block_index.Insert(block.GetHash(), block);
+    Assert(inserted);
     pindexNew->m_compact_id = AllocateCompactId();
 
     // We assign the sequence id to blocks only when the full data is available,
@@ -2333,12 +2448,7 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     // competitive advantage.
     pindexNew->nSequenceId = 0;
 
-    if (pindexNew->phashBlock == nullptr) {
-        const auto it{m_block_index.RawMap().find(block.GetHash())};
-        Assert(it != m_block_index.RawMap().end());
-        pindexNew->phashBlock = &it->first;
-    }
-    if (CBlockIndex* pprev{m_block_index.Lookup(block.hashPrevBlock)}) {
+    if (CBlockIndex* pprev{LookupBlockIndex(block.hashPrevBlock)}) {
         pindexNew->pprev = pprev;
         pindexNew->nHeight = pindexNew->pprev->nHeight + 1;
         pindexNew->BuildSkip();
@@ -2511,11 +2621,7 @@ CBlockIndex* BlockManager::InsertBlockIndex(const uint256& hash)
     }
 
     auto [pindex, inserted]{m_block_index.Insert(hash)};
-    if (inserted && pindex->phashBlock == nullptr) {
-        const auto it{m_block_index.RawMap().find(hash)};
-        Assert(it != m_block_index.RawMap().end());
-        pindex->phashBlock = &it->first;
-    }
+    (void)inserted;
     return pindex;
 }
 
@@ -2785,10 +2891,17 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
         break;
     }
 
+    // BALANCED/LOWMEM can now release the 24M-node legacy hash map while
+    // preserving stable CBlockIndex* shells in dense compact-id order. If the
+    // derived compact lookup is unavailable we deliberately retain the legacy
+    // representation and continue normally.
+    if (!ActivateCompactBlockIndexIdentityStore(vSortedByHeight)) {
+        return false;
+    }
+
     // ChainstateManager immediately needs to traverse every loaded index to
     // rebuild candidate and best-header state. Preserve this already-built,
-    // height-ordered view across the handoff instead of rescanning the entire
-    // legacy unordered_map into another 24M-entry pointer vector.
+    // height-ordered view across the handoff.
     m_startup_block_index_view = std::move(vSortedByHeight);
 
     return true;

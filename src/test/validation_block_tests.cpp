@@ -855,6 +855,82 @@ BOOST_AUTO_TEST_CASE(compact_block_index_persistent_lookup)
     BOOST_CHECK(!lookup.FindResident(uint256S("deadbeef"), store).has_value());
 }
 
+BOOST_AUTO_TEST_CASE(block_index_store_compact_identity_cutover)
+{
+    BlockIndexStore store{BlockIndexResidencyMode::BALANCED, 2};
+
+    const std::array<uint256, 3> hashes{
+        uint256S("01"), uint256S("02"), uint256S("03")};
+
+    auto [it_a, inserted_a] = store.try_emplace(hashes[0]);
+    auto [it_b, inserted_b] = store.try_emplace(hashes[1]);
+    auto [it_c, inserted_c] = store.try_emplace(hashes[2]);
+    BOOST_REQUIRE(inserted_a && inserted_b && inserted_c);
+
+    CBlockIndex& a{it_a->second};
+    CBlockIndex& b{it_b->second};
+    CBlockIndex& c{it_c->second};
+
+    a.phashBlock = &it_a->first;
+    b.phashBlock = &it_b->first;
+    c.phashBlock = &it_c->first;
+    a.m_compact_id = 0;
+    b.m_compact_id = 1;
+    c.m_compact_id = 2;
+    a.nHeight = 0;
+    b.nHeight = 1;
+    c.nHeight = 2;
+    b.pprev = &a;
+    c.pprev = &b;
+    c.pskip = &a;
+    a.StorageFile() = 10;
+    b.StorageFile() = 11;
+    c.StorageFile() = 12;
+
+    std::vector<CBlockIndex*> by_id{&a, &b, &c};
+
+    BOOST_REQUIRE(store.PrepareCompactIdentityCutover(
+        by_id,
+        /*immutable_count=*/2,
+        [&](BlockIndexId id) -> const uint256* {
+            return id < 2 ? &hashes[id] : nullptr;
+        }));
+
+    CBlockIndex* new_a{store.RemapPreparedIdentity(&a)};
+    CBlockIndex* new_b{store.RemapPreparedIdentity(&b)};
+    CBlockIndex* new_c{store.RemapPreparedIdentity(&c)};
+
+    BOOST_REQUIRE(new_a && new_b && new_c);
+    BOOST_CHECK_NE(new_a, &a);
+    BOOST_CHECK_NE(new_b, &b);
+    BOOST_CHECK_NE(new_c, &c);
+    BOOST_CHECK_EQUAL(new_b->pprev, new_a);
+    BOOST_CHECK_EQUAL(new_c->pprev, new_b);
+    BOOST_CHECK_EQUAL(new_c->pskip, new_a);
+    BOOST_CHECK_EQUAL(new_c->StorageFile(), 12);
+    BOOST_CHECK_EQUAL(new_a->GetBlockHash(), hashes[0]);
+    BOOST_CHECK_EQUAL(new_c->GetBlockHash(), hashes[2]);
+
+    store.CommitCompactIdentityCutover();
+
+    BOOST_CHECK(store.CompactIdentityActive());
+    BOOST_CHECK(store.RawMap().empty());
+    BOOST_CHECK_EQUAL(store.size(), 3U);
+    BOOST_CHECK_EQUAL(store.ImmutableIdentityCount(), 2U);
+    BOOST_CHECK_EQUAL(store.ByCompactId(0), new_a);
+    BOOST_CHECK_EQUAL(store.ByCompactId(2), new_c);
+
+    // Immutable-base lookup is supplied by BlockManager's compact lookup.
+    BOOST_CHECK(store.Lookup(hashes[0]) == nullptr);
+    // Tail/live identity remains exact and fully resident.
+    BOOST_CHECK_EQUAL(store.Lookup(hashes[2]), new_c);
+
+    store.UpdateHotWindow(new_b);
+    // Once the hot front is built, recent immutable identities are resident.
+    BOOST_CHECK_EQUAL(store.Lookup(hashes[0]), new_a);
+    BOOST_CHECK_EQUAL(store.Lookup(hashes[1]), new_b);
+}
+
 BOOST_AUTO_TEST_CASE(block_index_store_payload_cache_indirection)
 {
     const size_t budget{2 * sizeof(BlockIndexResidentPayload)};
