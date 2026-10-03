@@ -855,6 +855,83 @@ BOOST_AUTO_TEST_CASE(compact_block_index_persistent_lookup)
     BOOST_CHECK(!lookup.FindResident(uint256S("deadbeef"), store).has_value());
 }
 
+BOOST_AUTO_TEST_CASE(block_index_store_direct_compact_identity_bootstrap)
+{
+    BlockIndexStore store{BlockIndexResidencyMode::BALANCED, 2};
+
+    const std::array<uint256, 4> hashes{
+        uint256S("01"), uint256S("02"), uint256S("03"), uint256S("04")};
+
+    std::vector<BlockIndexStore::DirectTailIdentity> tail{
+        {2, hashes[2]},
+        {3, hashes[3]},
+    };
+
+    BOOST_REQUIRE(store.PrepareDirectCompactIdentity(
+        /*total_count=*/4,
+        /*immutable_count=*/2,
+        [&](BlockIndexId id) -> const uint256* {
+            return id < 2 ? &hashes[id] : nullptr;
+        },
+        tail));
+
+    BOOST_CHECK(store.DirectCompactBootstrapActive());
+    BOOST_CHECK(store.CompactIdentityActive());
+    BOOST_CHECK(store.RawMap().empty());
+    BOOST_CHECK_EQUAL(store.size(), 4U);
+    BOOST_CHECK_EQUAL(store.ResidentPayloads(), 0U);
+
+    CBlockIndex* a{store.ByCompactId(0)};
+    CBlockIndex* b{store.ByCompactId(1)};
+    CBlockIndex* c{store.ByCompactId(2)};
+    CBlockIndex* d{store.ByCompactId(3)};
+    BOOST_REQUIRE(a && b && c && d);
+
+    BOOST_CHECK_EQUAL(a->nHeight, -1);
+    BOOST_CHECK_EQUAL(d->nHeight, -1);
+    BOOST_CHECK_EQUAL(a->GetBlockHash(), hashes[0]);
+    BOOST_CHECK_EQUAL(d->GetBlockHash(), hashes[3]);
+
+    // Immutable identities are supplied through BlockManager's compact lookup.
+    BOOST_CHECK(store.Lookup(hashes[0]) == nullptr);
+    BOOST_CHECK_EQUAL(store.Lookup(hashes[2]), c);
+    BOOST_CHECK_EQUAL(store.Lookup(hashes[3]), d);
+
+    a->nHeight = 0;
+    b->nHeight = 1;
+    c->nHeight = 2;
+    d->nHeight = 3;
+    b->pprev = a;
+    c->pprev = b;
+    d->pprev = c;
+
+    std::array<BlockIndexResidentPayload, 4> backing{};
+    backing[0].nFile = 10;
+    backing[1].nFile = 11;
+    backing[2].nFile = 12;
+    backing[3].nFile = 13;
+
+    size_t loads{0};
+    BOOST_REQUIRE(store.ActivatePayloadCache(
+        d,
+        [&](const CBlockIndex& index, BlockIndexResidentPayload& payload) {
+            BOOST_REQUIRE(index.m_compact_id < backing.size());
+            payload = backing[index.m_compact_id];
+            ++loads;
+            return true;
+        }));
+
+    // Direct bootstrap had no eager payloads. Cache activation loaded only the
+    // two-block hot window.
+    BOOST_CHECK_EQUAL(loads, 2U);
+    BOOST_CHECK_EQUAL(store.ResidentPayloads(), 2U);
+    BOOST_CHECK(!a->HasResidentPayload());
+    BOOST_CHECK(!b->HasResidentPayload());
+    BOOST_CHECK(c->HasResidentPayload());
+    BOOST_CHECK(d->HasResidentPayload());
+    BOOST_CHECK_EQUAL(d->StorageFile(), 13);
+}
+
 BOOST_AUTO_TEST_CASE(block_index_store_compact_identity_cutover)
 {
     BlockIndexStore store{BlockIndexResidencyMode::BALANCED, 2};

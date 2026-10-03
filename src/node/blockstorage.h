@@ -415,6 +415,100 @@ public:
     }
 
     using IdentityHashResolver = std::function<const uint256*(BlockIndexId)>;
+    using DirectTailIdentity = std::pair<BlockIndexId, uint256>;
+
+    /**
+     * Initialize BALANCED/LOWMEM identity storage directly in compact-id order.
+     *
+     * Unlike PrepareCompactIdentityCutover(), this path starts from an empty
+     * legacy map and deliberately creates no bootstrap payload objects. The
+     * canonical LevelDB stream fills the shell fields afterward.
+     */
+    bool PrepareDirectCompactIdentity(
+        size_t total_count,
+        size_t immutable_count,
+        const IdentityHashResolver& immutable_hash,
+        const std::vector<DirectTailIdentity>& tail)
+    {
+        if (m_mode == BlockIndexResidencyMode::FULL ||
+            m_compact_identity_active ||
+            m_compact_identity_prepared ||
+            !m_entries.empty() ||
+            !immutable_hash ||
+            immutable_count > total_count ||
+            tail.size() != total_count - immutable_count) {
+            return false;
+        }
+
+        m_compact_identities.clear();
+        m_live_identity_index.clear();
+        m_hot_identity_index.clear();
+        m_live_identity_index.reserve(std::max<size_t>(16, tail.size() * 2));
+
+        const auto abort = [this]() {
+            m_compact_identities.clear();
+            m_live_identity_index.clear();
+            m_hot_identity_index.clear();
+            m_immutable_identity_count = 0;
+            m_direct_identity_bootstrap = false;
+            m_compact_identity_active = false;
+        };
+
+        for (size_t raw_id = 0; raw_id < total_count; ++raw_id) {
+            const auto id{static_cast<BlockIndexId>(raw_id)};
+            CBlockIndex& index{m_compact_identities.emplace_back()};
+            index.SetPayloadProvider(this);
+            index.m_compact_id = id;
+
+            // -1 is an impossible loaded height and doubles as the canonical
+            // LevelDB "seen" marker during direct bootstrap.
+            index.nHeight = -1;
+
+            if (raw_id < immutable_count) {
+                const uint256* hash{immutable_hash(id)};
+                if (!hash) {
+                    abort();
+                    return false;
+                }
+                index.phashBlock = hash;
+            } else {
+                const DirectTailIdentity& identity{tail[raw_id - immutable_count]};
+                if (identity.first != id) {
+                    abort();
+                    return false;
+                }
+                auto [it, inserted]{
+                    m_live_identity_index.emplace(identity.second, &index)};
+                if (!inserted) {
+                    abort();
+                    return false;
+                }
+                index.phashBlock = &it->first;
+            }
+        }
+
+        m_immutable_identity_count = immutable_count;
+        m_direct_identity_bootstrap = true;
+        m_compact_identity_active = true;
+        m_stats.insertions += total_count;
+        return true;
+    }
+
+    void ResetDirectCompactIdentity()
+    {
+        if (!m_direct_identity_bootstrap) return;
+        m_compact_identities.clear();
+        m_live_identity_index.clear();
+        m_hot_identity_index.clear();
+        m_immutable_identity_count = 0;
+        m_direct_identity_bootstrap = false;
+        m_compact_identity_active = false;
+    }
+
+    [[nodiscard]] bool DirectCompactBootstrapActive() const noexcept
+    {
+        return m_direct_identity_bootstrap;
+    }
 
     bool PrepareCompactIdentityCutover(
         const std::vector<CBlockIndex*>& by_id,
@@ -532,6 +626,7 @@ public:
         }
 
         m_immutable_identity_count = immutable_count;
+        m_direct_identity_bootstrap = false;
         m_compact_identity_prepared = true;
         return true;
     }
@@ -778,11 +873,19 @@ public:
         if (!tip || !loader) return false;
         if (m_cache_active) return true;
 
+        m_payload_loader = std::move(loader);
+
         std::vector<std::pair<CBlockIndex*, BlockIndexResidentPayload>> hot;
         hot.reserve(std::min<size_t>(m_hot_depth, static_cast<size_t>(tip->nHeight) + 1));
         for (CBlockIndex* index{tip}; index && hot.size() < m_hot_depth; index = index->pprev) {
-            if (!index->m_resident_payload) return false;
-            hot.emplace_back(index, *index->m_resident_payload);
+            BlockIndexResidentPayload payload;
+            if (index->m_resident_payload) {
+                payload = *index->m_resident_payload;
+            } else if (!m_payload_loader(*index, payload)) {
+                return false;
+            }
+            payload.algo_history = nullptr;
+            hot.emplace_back(index, std::move(payload));
         }
 
         ForEach([](CBlockIndex& index) { index.ClearResidentPayload(); });
@@ -790,12 +893,8 @@ public:
         m_payload_cache_lru.clear();
         m_payload_cache_index.clear();
         m_cached_algo_payloads.clear();
-        for (auto& [_, payload] : hot) {
-            payload.algo_history = nullptr;
-        }
         m_payload_pins.clear();
         m_hot_window.clear();
-        m_payload_loader = std::move(loader);
         m_cache_active = true;
         m_eviction_enabled = true;
 
@@ -953,6 +1052,7 @@ private:
     std::unordered_map<uint256, CBlockIndex*, BlockHasher> m_live_identity_index;
     std::unordered_map<uint256, CBlockIndex*, BlockHasher> m_hot_identity_index;
     size_t m_immutable_identity_count{0};
+    bool m_direct_identity_bootstrap{false};
     bool m_compact_identity_prepared{false};
     bool m_compact_identity_active{false};
 
