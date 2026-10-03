@@ -2480,6 +2480,10 @@ bool BlockManager::PrepareDirectCompactBootstrap()
 
     if (!PrepareDirectCompactMetadataBacking()) {
         m_compact_block_ids.reset();
+        m_compact_block_delta.reset();
+        m_compact_block_delta_log.reset();
+        m_compact_block_delta_state.reset();
+        m_compact_block_delta_overlay.clear();
         m_next_compact_id = 0;
         return false;
     }
@@ -2494,6 +2498,9 @@ bool BlockManager::PrepareDirectCompactBootstrap()
             tail)) {
         LogPrintf("Block-index direct bootstrap: failed allocating compact-id shell arena\n");
         m_compact_block_ids.reset();
+        m_compact_block_delta.reset();
+        m_compact_block_delta_log.reset();
+        m_compact_block_delta_state.reset();
         m_compact_block_delta_overlay.clear();
         m_next_compact_id = 0;
         return false;
