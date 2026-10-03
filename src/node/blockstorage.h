@@ -293,6 +293,50 @@ public:
         return it->second;
     }
 
+    // Pointer-oriented identity API used by production code. Keeping callers
+    // off unordered_map iterators allows BALANCED/LOWMEM to change identity
+    // ownership without changing validation semantics.
+    CBlockIndex* Lookup(const uint256& hash)
+    {
+        auto it{find(hash)};
+        return it == end() ? nullptr : &it->second;
+    }
+
+    const CBlockIndex* Lookup(const uint256& hash) const
+    {
+        auto it{find(hash)};
+        return it == end() ? nullptr : &it->second;
+    }
+
+    [[nodiscard]] bool Contains(const uint256& hash) const
+    {
+        return Lookup(hash) != nullptr;
+    }
+
+    std::pair<CBlockIndex*, bool> Insert(const uint256& hash)
+    {
+        auto [it, inserted]{try_emplace(hash)};
+        return {&it->second, inserted};
+    }
+
+    std::pair<CBlockIndex*, bool> Insert(const uint256& hash, const CBlockHeader& block)
+    {
+        auto [it, inserted]{try_emplace(hash, block)};
+        return {&it->second, inserted};
+    }
+
+    template <typename Fn>
+    void ForEach(Fn&& fn)
+    {
+        for (auto& [_, index] : m_entries) fn(index);
+    }
+
+    template <typename Fn>
+    void ForEach(Fn&& fn) const
+    {
+        for (const auto& [_, index] : m_entries) fn(index);
+    }
+
     BlockMap& RawMap() noexcept { return m_entries; }
     const BlockMap& RawMap() const noexcept { return m_entries; }
 

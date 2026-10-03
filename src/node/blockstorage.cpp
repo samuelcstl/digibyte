@@ -290,9 +290,9 @@ std::vector<CBlockIndex*> BlockManager::GetAllBlockIndices()
     AssertLockHeld(cs_main);
     std::vector<CBlockIndex*> rv;
     rv.reserve(m_block_index.size());
-    for (auto& [_, block_index] : m_block_index) {
+    m_block_index.ForEach([&](CBlockIndex& block_index) {
         rv.push_back(&block_index);
-    }
+    });
     return rv;
 }
 
@@ -301,13 +301,13 @@ std::vector<CBlockIndex*> BlockManager::GetAllBlockIndicesByCompactId()
     AssertLockHeld(cs_main);
 
     std::vector<CBlockIndex*> ordered(m_block_index.size(), nullptr);
-    for (auto& [_, block_index] : m_block_index) {
+    m_block_index.ForEach([&](CBlockIndex& block_index) {
         const BlockIndexId id{block_index.m_compact_id};
         Assert(id != INVALID_BLOCK_INDEX_ID);
         Assert(static_cast<size_t>(id) < ordered.size());
         Assert(ordered[id] == nullptr);
         ordered[id] = &block_index;
-    }
+    });
 
     for (CBlockIndex* index : ordered) {
         Assert(index != nullptr);
@@ -2309,26 +2309,23 @@ bool BlockManager::ActivateBlockIndexPayloadCache(CBlockIndex* tip)
 CBlockIndex* BlockManager::LookupBlockIndex(const uint256& hash)
 {
     AssertLockHeld(cs_main);
-    BlockMap::iterator it = m_block_index.find(hash);
-    return it == m_block_index.end() ? nullptr : &it->second;
+    return m_block_index.Lookup(hash);
 }
 
 const CBlockIndex* BlockManager::LookupBlockIndex(const uint256& hash) const
 {
     AssertLockHeld(cs_main);
-    BlockMap::const_iterator it = m_block_index.find(hash);
-    return it == m_block_index.end() ? nullptr : &it->second;
+    return m_block_index.Lookup(hash);
 }
 
 CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockIndex*& best_header)
 {
     AssertLockHeld(cs_main);
 
-    auto [mi, inserted] = m_block_index.try_emplace(block.GetHash(), block);
+    auto [pindexNew, inserted] = m_block_index.Insert(block.GetHash(), block);
     if (!inserted) {
-        return &mi->second;
+        return pindexNew;
     }
-    CBlockIndex* pindexNew = &(*mi).second;
     pindexNew->m_compact_id = AllocateCompactId();
 
     // We assign the sequence id to blocks only when the full data is available,
@@ -2336,10 +2333,13 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     // competitive advantage.
     pindexNew->nSequenceId = 0;
 
-    pindexNew->phashBlock = &((*mi).first);
-    BlockMap::iterator miPrev = m_block_index.find(block.hashPrevBlock);
-    if (miPrev != m_block_index.end()) {
-        pindexNew->pprev = &(*miPrev).second;
+    if (pindexNew->phashBlock == nullptr) {
+        const auto it{m_block_index.RawMap().find(block.GetHash())};
+        Assert(it != m_block_index.RawMap().end());
+        pindexNew->phashBlock = &it->first;
+    }
+    if (CBlockIndex* pprev{m_block_index.Lookup(block.hashPrevBlock)}) {
+        pindexNew->pprev = pprev;
         pindexNew->nHeight = pindexNew->pprev->nHeight + 1;
         pindexNew->BuildSkip();
     }
@@ -2365,11 +2365,9 @@ void BlockManager::PruneOneBlockFile(const int fileNumber)
     AssertLockHeld(cs_main);
     LOCK(cs_LastBlockFile);
 
-    for (auto& entry : m_block_index) {
-        CBlockIndex* pindex = &entry.second;
-        if (!(pindex->nStatus & BLOCK_HAVE_DATA)) {
-            continue;
-        }
+    m_block_index.ForEach([&](CBlockIndex& block_index) {
+        CBlockIndex* pindex = &block_index;
+        if (!(pindex->nStatus & BLOCK_HAVE_DATA)) return;
         if (pindex->StorageFile() == fileNumber) {
             if (m_dirty_blockindex.insert(pindex).second) {
                 m_block_index.PinPayload(*pindex);
@@ -2393,7 +2391,7 @@ void BlockManager::PruneOneBlockFile(const int fileNumber)
                 }
             }
         }
-    }
+    });
 
     m_blockfile_info.at(fileNumber) = CBlockFileInfo{};
     m_dirty_fileinfo.insert(fileNumber);
@@ -2512,10 +2510,11 @@ CBlockIndex* BlockManager::InsertBlockIndex(const uint256& hash)
         return nullptr;
     }
 
-    const auto [mi, inserted]{m_block_index.try_emplace(hash)};
-    CBlockIndex* pindex = &(*mi).second;
-    if (inserted) {
-        pindex->phashBlock = &((*mi).first);
+    auto [pindex, inserted]{m_block_index.Insert(hash)};
+    if (inserted && pindex->phashBlock == nullptr) {
+        const auto it{m_block_index.RawMap().find(hash)};
+        Assert(it != m_block_index.RawMap().end());
+        pindex->phashBlock = &it->first;
     }
     return pindex;
 }
@@ -2907,11 +2906,11 @@ bool BlockManager::LoadBlockIndexDB(const std::optional<uint256>& snapshot_block
     // Check presence of blk files
     LogPrintf("Checking all blk files are present...\n");
     std::set<int> setBlkDataFiles;
-    for (const auto& [_, block_index] : m_block_index) {
+    m_block_index.ForEach([&](const CBlockIndex& block_index) {
         if (block_index.nStatus & BLOCK_HAVE_DATA) {
             setBlkDataFiles.insert(block_index.StorageFile());
         }
-    }
+    });
     for (std::set<int>::iterator it = setBlkDataFiles.begin(); it != setBlkDataFiles.end(); it++) {
         FlatFilePos pos(*it, 0);
         if (OpenBlockFile(pos, true).IsNull()) {
