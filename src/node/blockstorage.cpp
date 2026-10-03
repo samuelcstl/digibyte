@@ -3108,7 +3108,14 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
         } else {
             pindex->nChainWork = (pindex->pprev ? pindex->pprev->nChainWork : 0) + GetBlockProof(*pindex);
             ++chainwork_cache_misses;
-            chainwork_cache_migration.push_back(pindex);
+            // The direct path intentionally has no resident historical
+            // payloads yet. Serializing CDiskBlockIndex here would materialize
+            // an empty payload before compact backing is installed. Keep the
+            // reconstructed chainwork in memory for this run; ordinary legacy
+            // startup retains the existing lazy migration behavior.
+            if (!direct_bootstrap) {
+                chainwork_cache_migration.push_back(pindex);
+            }
         }
         const auto chainwork_end{SteadyClock::now()};
         if (direct_bootstrap) {
@@ -3205,10 +3212,11 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
         chainwork_cache_migrated += chainwork_cache_migration.size();
     }
 
-    LogPrintf("Startup timing: chain-work cache: hits=%d misses=%d migrated=%d write=%d ms\n",
+    LogPrintf("Startup timing: chain-work cache: hits=%d misses=%d migrated=%d deferred_direct=%d write=%d ms\n",
               chainwork_cache_hits,
               chainwork_cache_misses,
               chainwork_cache_migrated,
+              direct_bootstrap ? chainwork_cache_misses : 0,
               Ticks<std::chrono::milliseconds>(chainwork_cache_write_time));
     LogPrintf("Startup timing: block-index reconstruction detail: algo=%d ms chainwork=%d ms timemax=%d ms linkage=%d ms\n",
               Ticks<std::chrono::milliseconds>(reconstruction_algo_time),
