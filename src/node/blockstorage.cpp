@@ -2283,16 +2283,13 @@ bool BlockManager::ActivateCompactBlockIndexIdentityStore(
         return true;
     }
 
+    // Once the legacy identity map is released, hash lookup becomes part of
+    // the correctness path. Require the compact lookup to have been explicitly
+    // built/verified by the configured lifecycle mode instead of silently
+    // trusting an unverified leftover file when -blockindexcompactlookup=off.
     if (!m_compact_block_lookup || !m_compact_block_lookup->IsOpen()) {
-        auto lookup = std::make_unique<CompactBlockIndexLookup>();
-        std::string error;
-        const fs::path path{CompactBlockIndexLookupPath()};
-        if (!lookup->Open(path, *m_compact_block_index, error)) {
-            LogPrintf("Block-index identity: compact lookup unavailable (%s); retaining legacy unordered_map ownership\n",
-                      error);
-            return true;
-        }
-        m_compact_block_lookup = std::move(lookup);
+        LogPrintf("Block-index identity: verified compact lookup unavailable; retaining legacy unordered_map ownership (set -blockindexcompactlookup=verify or build)\n");
+        return true;
     }
 
     if (!m_compact_block_lookup->HasResidentProbeFront()) {
