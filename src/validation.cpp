@@ -5381,6 +5381,29 @@ bool Chainstate::LoadChainTip()
     }
     m_chain.SetTip(*pindex);
 
+    // Rebuild candidates only after the persisted chainstate tip is known.
+    // TryAddBlockIndexCandidate() now rejects blocks with less work than the
+    // active tip before touching the std::set, avoiding the startup-only
+    // allocation of one candidate node for nearly every historical block.
+    const auto candidates_start{SteadyClock::now()};
+    setBlockIndexCandidates.clear();
+    const CBlockIndex* snapshot_base{m_chainman.GetSnapshotBaseBlock()};
+    size_t candidate_eligible{0};
+    m_blockman.m_block_index.ForEach([&](CBlockIndex& candidate) {
+        CBlockIndex* candidate_ptr{&candidate};
+        if (candidate_ptr == snapshot_base ||
+                (candidate.IsValid(BLOCK_VALID_TRANSACTIONS) &&
+                 (candidate.HaveNumChainTxs() || candidate.pprev == nullptr))) {
+            ++candidate_eligible;
+            TryAddBlockIndexCandidate(candidate_ptr);
+        }
+    });
+    LogPrintf("Startup timing: block-index candidate rebuild after tip: scanned=%u eligible=%u retained=%u in %d ms\n",
+              m_blockman.m_block_index.size(),
+              candidate_eligible,
+              setBlockIndexCandidates.size(),
+              Ticks<std::chrono::milliseconds>(SteadyClock::now() - candidates_start));
+
     Assert(m_chain.CompactIdMirrorMatchesPointers());
     if (m_chain.CompactIdsComplete()) {
         LogPrintf("Block-index compact active-chain mirror: entries=%u tip_id=%u complete=1\n",
@@ -5709,30 +5732,27 @@ bool ChainstateManager::LoadBlockIndex()
                       vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - collect_start));
         }
 
-        const auto candidates_start{SteadyClock::now()};
+        // The active chain tip is not known yet, so populating
+        // setBlockIndexCandidates here would temporarily insert essentially
+        // every transaction-valid historical block. On DigiByte's 24M+ block
+        // history that creates more than a gigabyte of short-lived std::set
+        // nodes whose allocator pages can remain resident after pruning.
+        //
+        // Candidate population is deferred until LoadChainTip(), where the
+        // persisted chainstate tip is known and TryAddBlockIndexCandidate() can
+        // reject historical entries before allocating set nodes. Keep this pass
+        // for the global best-invalid and best-header state.
+        const auto header_start{SteadyClock::now()};
         for (CBlockIndex* pindex : vSortedByHeight) {
             if (m_interrupt) return false;
-            // If we have an assumeutxo-based chainstate, then the snapshot
-            // block will be a candidate for the tip, but it may not be
-            // VALID_TRANSACTIONS (eg if we haven't yet downloaded the block),
-            // so we special-case the snapshot block as a potential candidate
-            // here.
-            if (pindex == GetSnapshotBaseBlock() ||
-                    (pindex->IsValid(BLOCK_VALID_TRANSACTIONS) &&
-                     (pindex->HaveNumChainTxs() || pindex->pprev == nullptr))) {
-
-                for (Chainstate* chainstate : GetAll()) {
-                    chainstate->TryAddBlockIndexCandidate(pindex);
-                }
-            }
             if (pindex->nStatus & BLOCK_FAILED_MASK && (!m_best_invalid || pindex->nChainWork > m_best_invalid->nChainWork)) {
                 m_best_invalid = pindex;
             }
             if (pindex->IsValid(BLOCK_VALID_TREE) && (m_best_header == nullptr || CBlockIndexWorkComparator()(m_best_header, pindex)))
                 m_best_header = pindex;
         }
-        LogPrintf("Startup timing: block-index candidate/header pass: %d entries in %d ms\n",
-                  vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - candidates_start));
+        LogPrintf("Startup timing: block-index header pass: %d entries in %d ms\n",
+                  vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - header_start));
 
         needs_init = m_blockman.m_block_index.empty();
     }
