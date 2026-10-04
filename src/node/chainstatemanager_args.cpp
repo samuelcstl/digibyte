@@ -38,6 +38,30 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
 
     ReadDatabaseArgs(args, opts.block_tree_db);
     ReadDatabaseArgs(args, opts.coins_db);
+
+    const auto read_open_files =
+        [&](const char* arg_name, DBOptions& db_options) -> util::Result<void> {
+            if (auto value{args.GetIntArg(arg_name)}) {
+                if (*value < DBWRAPPER_MIN_OPEN_FILES ||
+                    *value > DBWRAPPER_MAX_OPEN_FILES) {
+                    return util::Error{strprintf(
+                        Untranslated("%s must be between %d and %d"),
+                        arg_name,
+                        DBWRAPPER_MIN_OPEN_FILES,
+                        DBWRAPPER_MAX_OPEN_FILES)};
+                }
+                db_options.max_open_files = static_cast<int>(*value);
+            }
+            return {};
+        };
+
+    if (auto result{read_open_files("-blockindexdbopenfiles", opts.block_tree_db)}; !result) {
+        return result;
+    }
+    if (auto result{read_open_files("-chainstatedbopenfiles", opts.coins_db)}; !result) {
+        return result;
+    }
+
     ReadCoinsViewArgs(args, opts.coins_view);
 
     return {};

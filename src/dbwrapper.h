@@ -23,10 +23,18 @@
 static const size_t DBWRAPPER_PREALLOC_KEY_SIZE = 64;
 static const size_t DBWRAPPER_PREALLOC_VALUE_SIZE = 1024;
 
+// Match LevelDB's sanitizer bounds for max_open_files so configuration is
+// explicit rather than silently clamped.
+static constexpr int DBWRAPPER_MIN_OPEN_FILES{74};
+static constexpr int DBWRAPPER_MAX_OPEN_FILES{50000};
+
 //! User-controlled performance and debug options.
 struct DBOptions {
     //! Compact database on startup.
     bool force_compact = false;
+    //! Override LevelDB table-cache/open-file capacity. Null preserves the
+    //! existing platform default.
+    std::optional<int> max_open_files{};
 };
 
 //! Application-specific storage settings.

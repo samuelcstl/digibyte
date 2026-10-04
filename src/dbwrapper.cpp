@@ -109,7 +109,7 @@ public:
     }
 };
 
-static void SetMaxOpenFiles(leveldb::Options *options) {
+static void SetMaxOpenFiles(leveldb::Options *options, const DBOptions& db_options) {
     // On most platforms the default setting of max_open_files (which is 1000)
     // is optimal. On Windows using a large file count is OK because the handles
     // do not interfere with select() loops. On 64-bit Unix hosts this value is
@@ -124,17 +124,24 @@ static void SetMaxOpenFiles(leveldb::Options *options) {
     //
     // See PR #12495 for further discussion.
 
-    int default_open_files = options->max_open_files;
+    const int default_open_files{options->max_open_files};
+    if (db_options.max_open_files) {
+        options->max_open_files = *db_options.max_open_files;
+    } else {
 #ifndef WIN32
-    if (sizeof(void*) < 8) {
-        options->max_open_files = 64;
-    }
+        if (sizeof(void*) < 8) {
+            options->max_open_files = 64;
+        }
 #endif
-    LogPrint(BCLog::LEVELDB, "LevelDB using max_open_files=%d (default=%d)\n",
-             options->max_open_files, default_open_files);
+    }
+    LogPrint(BCLog::LEVELDB,
+             "LevelDB using max_open_files=%d (default=%d override=%s)\n",
+             options->max_open_files,
+             default_open_files,
+             db_options.max_open_files ? "yes" : "no");
 }
 
-static leveldb::Options GetOptions(size_t nCacheSize)
+static leveldb::Options GetOptions(size_t nCacheSize, const DBOptions& db_options)
 {
     leveldb::Options options;
     options.block_cache = leveldb::NewLRUCache(nCacheSize / 2);
@@ -147,7 +154,7 @@ static leveldb::Options GetOptions(size_t nCacheSize)
         // on corruption in later versions.
         options.paranoid_checks = true;
     }
-    SetMaxOpenFiles(&options);
+    SetMaxOpenFiles(&options, db_options);
     return options;
 }
 
@@ -227,7 +234,7 @@ CDBWrapper::CDBWrapper(const DBParams& params)
     DBContext().iteroptions.verify_checksums = true;
     DBContext().iteroptions.fill_cache = false;
     DBContext().syncoptions.sync = true;
-    DBContext().options = GetOptions(params.cache_bytes);
+    DBContext().options = GetOptions(params.cache_bytes, params.options);
     DBContext().options.create_if_missing = true;
     if (params.memory_only) {
         DBContext().penv = leveldb::NewMemEnv(leveldb::Env::Default());
