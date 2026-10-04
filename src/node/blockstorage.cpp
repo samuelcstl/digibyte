@@ -2739,6 +2739,30 @@ bool BlockManager::ActivateBlockIndexPayloadCache(CBlockIndex* tip)
     return true;
 }
 
+void BlockManager::AdviseCompactBlockIndexBackingCold()
+{
+    AssertLockHeld(cs_main);
+
+    if (!m_block_index.DirectCompactBootstrapActive()) return;
+
+    const uint64_t compact_bytes{
+        m_compact_block_index ? m_compact_block_index->SizeBytes() : 0};
+    const uint64_t lookup_bytes{
+        m_compact_block_lookup ? m_compact_block_lookup->SizeBytes() : 0};
+
+    const bool compact_advised{
+        m_compact_block_index && m_compact_block_index->AdviseCold()};
+    const bool lookup_advised{
+        m_compact_block_lookup && m_compact_block_lookup->AdviseCold()};
+
+    LogPrintf("Block-index direct bootstrap: cold-page advice compact=%d bytes=%u lookup=%d bytes=%u total=%u\n",
+              compact_advised,
+              compact_bytes,
+              lookup_advised,
+              lookup_bytes,
+              compact_bytes + lookup_bytes);
+}
+
 CBlockIndex* BlockManager::LookupBlockIndex(const uint256& hash)
 {
     AssertLockHeld(cs_main);

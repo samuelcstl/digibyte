@@ -38,6 +38,7 @@ public:
     CompactBlockIndexStore& operator=(const CompactBlockIndexStore&) = delete;
 
     bool Open(const fs::path& path, const uint256& expected_genesis, std::string& error);
+    bool AdviseCold() noexcept;
     void Close();
 
     [[nodiscard]] bool IsOpen() const noexcept { return m_entries != nullptr; }

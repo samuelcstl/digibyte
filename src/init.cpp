@@ -2260,6 +2260,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     LogPrintf("Startup timing: system health reconstruction: %d ms\n",
               Ticks<std::chrono::milliseconds>(SteadyClock::now() - system_health_start));
 
+    // Direct compact startup necessarily walks most of the large read-only
+    // mappings. Once all startup reconstruction is complete, tell the OS those
+    // clean pages are cold. The mappings stay valid and runtime access faults
+    // back only the sparse pages it actually needs.
+    WITH_LOCK(::cs_main, chainman.m_blockman.AdviseCompactBlockIndexBackingCold());
+
     // DD-FINAL-005 / AR-0: OP_CHECKPRICE is deterministically DISABLED (it now
     // consumes its witness operand and always pushes vchFalse). The interpreter no
     // longer consults g_get_oracle_consensus_price, so the production hook is left

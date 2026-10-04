@@ -1363,6 +1363,7 @@ public:
     void ResetDirectCompactBootstrap() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ActivateCompactBlockIndexIdentityStore(std::vector<CBlockIndex*>& startup_view) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ActivateBlockIndexPayloadCache(CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void AdviseCompactBlockIndexBackingCold() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
      * All pairs A->B, where A (or one of its ancestors) misses transactions, but B has transactions.

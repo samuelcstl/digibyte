@@ -388,6 +388,18 @@ std::optional<BlockIndexId> CompactBlockIndexLookup::FindResident(
     return std::nullopt;
 }
 
+bool CompactBlockIndexLookup::AdviseCold() noexcept
+{
+    if (!m_region) return false;
+
+    const bool discarded{
+        m_region->advise(boost::interprocess::mapped_region::advice_dontneed)};
+    // Exact-id/full-hash backing is touched only after a resident fingerprint
+    // match, so random advice is a better steady-state access hint.
+    m_region->advise(boost::interprocess::mapped_region::advice_random);
+    return discarded;
+}
+
 void CompactBlockIndexLookup::Close()
 {
     m_resident_fingerprints.clear();

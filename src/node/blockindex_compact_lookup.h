@@ -84,6 +84,7 @@ public:
         const CompactBlockIndexStore& source,
         std::string& error);
 
+    bool AdviseCold() noexcept;
     void Close();
 
     [[nodiscard]] bool IsOpen() const noexcept { return m_slots != nullptr; }

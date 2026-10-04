@@ -85,6 +85,18 @@ bool CompactBlockIndexStore::Open(
     }
 }
 
+bool CompactBlockIndexStore::AdviseCold() noexcept
+{
+    if (!m_region) return false;
+
+    const bool discarded{
+        m_region->advise(boost::interprocess::mapped_region::advice_dontneed)};
+    // Runtime historical access is sparse/random. This is only a performance
+    // hint and does not change mapping or pointer semantics.
+    m_region->advise(boost::interprocess::mapped_region::advice_random);
+    return discarded;
+}
+
 void CompactBlockIndexStore::Close()
 {
     m_entries = nullptr;
