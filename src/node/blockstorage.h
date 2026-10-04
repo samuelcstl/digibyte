@@ -236,6 +236,37 @@ public:
         BlockIndexStore* m_store;
     };
 
+    /**
+     * Narrow escape hatch for code paths that are already explicitly performing
+     * historical disk I/O. This does not disable no-I/O checking globally: only
+     * backing reads nested inside this guard are permitted.
+     */
+    class BackingReadPermitGuard
+    {
+    public:
+        explicit BackingReadPermitGuard(BlockIndexStore& store) : m_store{&store}
+        {
+            ++m_store->m_backing_read_permit_depth;
+        }
+
+        BackingReadPermitGuard(const BackingReadPermitGuard&) = delete;
+        BackingReadPermitGuard& operator=(const BackingReadPermitGuard&) = delete;
+
+        BackingReadPermitGuard(BackingReadPermitGuard&& other) noexcept
+            : m_store{std::exchange(other.m_store, nullptr)} {}
+        BackingReadPermitGuard& operator=(BackingReadPermitGuard&&) = delete;
+
+        ~BackingReadPermitGuard()
+        {
+            if (!m_store) return;
+            assert(m_store->m_backing_read_permit_depth > 0);
+            --m_store->m_backing_read_permit_depth;
+        }
+
+    private:
+        BlockIndexStore* m_store;
+    };
+
     iterator begin() noexcept { return m_entries.begin(); }
     const_iterator begin() const noexcept { return m_entries.begin(); }
     const_iterator cbegin() const noexcept { return m_entries.cbegin(); }
@@ -955,14 +986,26 @@ public:
      */
     NoIOGuard EnterNoIO() { return NoIOGuard{*this}; }
 
-    [[nodiscard]] bool BackingReadAllowed() const noexcept { return m_no_io_depth == 0; }
+    /**
+     * Permit lazy block-index backing access only while the caller is already
+     * carrying out an intentional historical disk read.
+     */
+    BackingReadPermitGuard PermitBackingRead()
+    {
+        return BackingReadPermitGuard{*this};
+    }
+
+    [[nodiscard]] bool BackingReadAllowed() const noexcept
+    {
+        return m_no_io_depth == 0 || m_backing_read_permit_depth > 0;
+    }
 
     void RecordBackingRead()
     {
         ++m_stats.backing_reads;
-        if (m_no_io_depth > 0) {
+        if (m_no_io_depth > 0 && m_backing_read_permit_depth == 0) {
             ++m_stats.no_io_violations;
-            assert(m_no_io_depth == 0 && "block-index backing read in no-I/O scope");
+            assert(false && "block-index backing read in no-I/O scope");
         }
     }
 
@@ -1090,6 +1133,7 @@ private:
 
     mutable BlockIndexResidencyStats m_stats;
     uint32_t m_no_io_depth{0};
+    uint32_t m_backing_read_permit_depth{0};
 };
 
 struct CBlockIndexWorkComparator {

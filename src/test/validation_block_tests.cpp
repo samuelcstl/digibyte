@@ -1214,6 +1214,72 @@ BOOST_AUTO_TEST_CASE(block_index_store_cold_known_payload_pin_before_no_io)
     BOOST_CHECK_EQUAL(stats.no_io_violations, 0U);
 }
 
+BOOST_AUTO_TEST_CASE(block_index_store_explicit_backing_read_permit)
+{
+    const size_t budget{2 * sizeof(BlockIndexResidentPayload)};
+    BlockIndexStore store{
+        BlockIndexResidencyMode::LOWMEM,
+        /*hot_depth=*/1,
+        budget};
+
+    const uint256 hash_a{uint256S("01")};
+    const uint256 hash_b{uint256S("02")};
+
+    auto [it_a, inserted_a] = store.try_emplace(hash_a);
+    auto [it_b, inserted_b] = store.try_emplace(hash_b);
+    BOOST_REQUIRE(inserted_a && inserted_b);
+
+    CBlockIndex& a{it_a->second};
+    CBlockIndex& b{it_b->second};
+    a.m_compact_id = 0;
+    b.m_compact_id = 1;
+    a.nHeight = 0;
+    b.nHeight = 1;
+    b.pprev = &a;
+    a.StorageFile() = 10;
+    b.StorageFile() = 11;
+
+    std::array<BlockIndexResidentPayload, 2> backing{
+        a.ResidentPayload(),
+        b.ResidentPayload()};
+    size_t loads{0};
+
+    BOOST_REQUIRE(store.ActivatePayloadCache(
+        &b,
+        [&](const CBlockIndex& index, BlockIndexResidentPayload& payload) {
+            BOOST_REQUIRE(index.m_compact_id < backing.size());
+            payload = backing[index.m_compact_id];
+            ++loads;
+            return true;
+        }));
+
+    BOOST_CHECK(!a.HasResidentPayload());
+    BOOST_CHECK(b.HasResidentPayload());
+
+    {
+        auto no_io = store.EnterNoIO();
+        BOOST_CHECK(!store.BackingReadAllowed());
+
+        {
+            // Model the DigiDollar historical block lookup: the outer validation
+            // scope remains no-I/O, but this already-intentional disk read may
+            // recover the cold block's compact payload.
+            auto permit = store.PermitBackingRead();
+            BOOST_CHECK(store.BackingReadAllowed());
+            BOOST_CHECK_EQUAL(a.StorageFile(), 10);
+            BOOST_CHECK_EQUAL(loads, 1U);
+        }
+
+        BOOST_CHECK(!store.BackingReadAllowed());
+    }
+
+    BOOST_CHECK(store.BackingReadAllowed());
+
+    const auto stats{store.GetResidencyStats()};
+    BOOST_CHECK_EQUAL(stats.backing_reads, 1U);
+    BOOST_CHECK_EQUAL(stats.no_io_violations, 0U);
+}
+
 BOOST_AUTO_TEST_CASE(block_index_store_bootstrap_arena_pointer_stability)
 {
     BlockIndexStore store{BlockIndexResidencyMode::BALANCED, 8};

@@ -131,6 +131,15 @@ public:
         auto block_it = m_blocks.find(block_hash);
         if (block_it == m_blocks.end()) {
             CBlock block;
+
+            // DigiDollar redemption/accounting intentionally resolves creating
+            // transactions from historical blocks when the local 64-block cache
+            // misses. ConnectTip normally forbids unexpected block-index backing
+            // reads, but this call is already an explicit historical disk read:
+            // permit the compact residency layer to recover this block's
+            // file/data-position payload while preserving the no-I/O guard for
+            // every other validation access.
+            auto backing_read_permit = blockman.m_block_index.PermitBackingRead();
             if (!blockman.ReadBlockFromDisk(block, block_index)) return false;
 
             std::map<uint256, CTransactionRef> block_txs;
