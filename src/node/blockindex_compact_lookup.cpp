@@ -18,6 +18,10 @@
 #include <exception>
 #include <limits>
 
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
+
 namespace node {
 namespace {
 
@@ -392,8 +396,21 @@ bool CompactBlockIndexLookup::AdviseCold() noexcept
 {
     if (!m_region) return false;
 
-    const bool discarded{
-        m_region->advise(boost::interprocess::mapped_region::advice_dontneed)};
+    bool discarded{false};
+
+#ifdef __linux__
+    // See CompactBlockIndexStore::AdviseCold(): Boost's POSIX DONTNEED path is
+    // a successful no-op in glibc, whereas native MADV_DONTNEED actually
+    // removes the clean file-backed pages from this process's RSS.
+    discarded = ::madvise(
+        m_region->get_address(),
+        m_region->get_size(),
+        MADV_DONTNEED) == 0;
+#else
+    discarded =
+        m_region->advise(boost::interprocess::mapped_region::advice_dontneed);
+#endif
+
     // Exact-id/full-hash backing is touched only after a resident fingerprint
     // match, so random advice is a better steady-state access hint.
     m_region->advise(boost::interprocess::mapped_region::advice_random);

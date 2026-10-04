@@ -11,6 +11,10 @@
 
 #include <exception>
 
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
+
 namespace node {
 
 CompactBlockIndexStore::CompactBlockIndexStore() = default;
@@ -89,8 +93,23 @@ bool CompactBlockIndexStore::AdviseCold() noexcept
 {
     if (!m_region) return false;
 
-    const bool discarded{
-        m_region->advise(boost::interprocess::mapped_region::advice_dontneed)};
+    bool discarded{false};
+
+#ifdef __linux__
+    // Boost prefers POSIX_MADV_DONTNEED when it is available. glibc deliberately
+    // implements that advice as a successful no-op on Linux, so use the native
+    // Linux MADV_DONTNEED operation here. For this read-only file mapping it
+    // drops resident PTEs while preserving the mapping; later accesses fault
+    // the current file contents back in normally.
+    discarded = ::madvise(
+        m_region->get_address(),
+        m_region->get_size(),
+        MADV_DONTNEED) == 0;
+#else
+    discarded =
+        m_region->advise(boost::interprocess::mapped_region::advice_dontneed);
+#endif
+
     // Runtime historical access is sparse/random. This is only a performance
     // hint and does not change mapping or pointer semantics.
     m_region->advise(boost::interprocess::mapped_region::advice_random);
