@@ -139,8 +139,10 @@ public:
             // permit the compact residency layer to recover this block's
             // file/data-position payload while preserving the no-I/O guard for
             // every other validation access.
-            auto backing_read_permit = blockman.m_block_index.PermitBackingRead();
-            if (!blockman.ReadBlockFromDisk(block, block_index)) return false;
+            {
+                auto backing_read_permit = blockman.m_block_index.PermitBackingRead();
+                if (!blockman.ReadBlockFromDisk(block, block_index)) return false;
+            }
 
             std::map<uint256, CTransactionRef> block_txs;
             for (const auto& btx : block.vtx) {
