@@ -228,8 +228,9 @@ public:
      * Generation-2 compact-store id.
      *
      * This is runtime identity metadata, not consensus state. Historical
-     * storage/merkle/time-max fields now live behind the residency payload,
-     * leaving the stable 64-bit shell at 112 bytes.
+     * storage/merkle/time-max fields now live behind the residency payload;
+     * shell-v2's tagged residency link leaves the stable 64-bit shell at
+     * 104 bytes.
      */
     uint32_t m_compact_id{std::numeric_limits<uint32_t>::max()};
 
