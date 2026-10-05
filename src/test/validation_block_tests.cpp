@@ -1289,7 +1289,7 @@ BOOST_AUTO_TEST_CASE(block_index_store_bootstrap_arena_pointer_stability)
     BOOST_REQUIRE(first_inserted);
     CBlockIndex& first{first_it->second};
     first.StorageFile() = 77;
-    BlockIndexResidentPayload* first_payload{first.m_resident_payload};
+    BlockIndexResidentPayload* first_payload{first.ResidentPayloadIfPresent()};
     BOOST_REQUIRE(first_payload);
 
     for (uint32_t i = 2; i < 140000; ++i) {
@@ -1300,7 +1300,7 @@ BOOST_AUTO_TEST_CASE(block_index_store_bootstrap_arena_pointer_stability)
         it->second.StorageFile() = static_cast<int>(i & 0x7fffffff);
     }
 
-    BOOST_CHECK(first.m_resident_payload == first_payload);
+    BOOST_CHECK(first.ResidentPayloadIfPresent() == first_payload);
     BOOST_CHECK_EQUAL(first.StorageFile(), 77);
     BOOST_CHECK_EQUAL(store.ResidentPayloads(), 139999U);
 }
