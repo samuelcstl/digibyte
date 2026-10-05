@@ -97,16 +97,16 @@ BOOST_AUTO_TEST_CASE(compact_block_index_record_snapshot)
     BOOST_CHECK_EQUAL(sizeof(CompactBlockIndexEntry), 160U);
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexFileHeader), 128U);
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexLookupHeader), 128U);
-    BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexLookupSlot), 16U);
+    BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexLookupSlot), 12U);
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexIdsHeader), 128U);
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexDeltaHeader), 128U);
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexDeltaLogHeader), 128U);
     BOOST_CHECK_EQUAL(sizeof(node::CompactBlockIndexDeltaLogRecord), 168U);
     if constexpr (sizeof(void*) == 8) {
-        // Historical storage/merkle/time-max domains now live behind the
-        // residency payload. The stable identity/topology shell shrinks from
-        // 152 to 112 bytes while retaining pointer identity.
-        BOOST_CHECK_EQUAL(sizeof(CBlockIndex), 112U);
+        // Historical storage/merkle/time-max domains live behind the
+        // residency payload. The tagged payload/provider link removes one
+        // redundant pointer while retaining stable CBlockIndex* identity.
+        BOOST_CHECK_EQUAL(sizeof(CBlockIndex), 104U);
         BOOST_CHECK_LE(sizeof(BlockIndexResidentPayload), 56U);
         BOOST_CHECK_EQUAL(sizeof(BlockIndexAlgoHistory), sizeof(CBlockIndex*) * NUM_ALGOS_IMPL);
     }
@@ -1289,7 +1289,7 @@ BOOST_AUTO_TEST_CASE(block_index_store_bootstrap_arena_pointer_stability)
     BOOST_REQUIRE(first_inserted);
     CBlockIndex& first{first_it->second};
     first.StorageFile() = 77;
-    BlockIndexResidentPayload* first_payload{first.m_resident_payload};
+    BlockIndexResidentPayload* first_payload{first.ResidentPayloadIfPresent()};
     BOOST_REQUIRE(first_payload);
 
     for (uint32_t i = 2; i < 140000; ++i) {
@@ -1300,7 +1300,7 @@ BOOST_AUTO_TEST_CASE(block_index_store_bootstrap_arena_pointer_stability)
         it->second.StorageFile() = static_cast<int>(i & 0x7fffffff);
     }
 
-    BOOST_CHECK(first.m_resident_payload == first_payload);
+    BOOST_CHECK(first.ResidentPayloadIfPresent() == first_payload);
     BOOST_CHECK_EQUAL(first.StorageFile(), 77);
     BOOST_CHECK_EQUAL(store.ResidentPayloads(), 139999U);
 }

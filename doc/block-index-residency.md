@@ -10,8 +10,10 @@
 >
 > The first real historical payload-cache cut-over is now implemented for
 > measurement: `nFile/nDataPos/nUndoPos`, `hashMerkleRoot` and `nTimeMax`
-> moved behind `BlockIndexStore`, reducing the 64-bit stable shell from 152
-> bytes to 112 bytes. `full` retains eager compatibility residency while
+> moved behind `BlockIndexStore`; shell-v2 then collapses the mutually
+> exclusive resident-payload/provider pointers into one tagged word, reducing
+> the 64-bit stable shell from 152 to 104 bytes. `full` retains eager
+> compatibility residency while
 > `balanced` and `lowmem` pin the active hot window and use a bounded
 > historical payload cache backed by the verified compact base plus live delta.
 > The missing `-blockindexcache=<MiB>` policy knob has been restored.
@@ -70,6 +72,36 @@ A first implementation therefore should preserve stable identity while
 introducing residency indirection. Fully evicting the identity object is a
 second-generation change that requires replacing or pinning these raw-pointer
 references.
+
+### Shell-v2 compatibility-first compaction
+
+The shell-v2 work keeps that rule. `CBlockIndex*` identity remains stable and
+the ordinary active-chain pointer vector remains canonical.
+
+Two pieces of generation-2 metadata can be reduced without changing any
+consensus or pointer-owner behavior:
+
+- the resident payload pointer and payload-provider pointer are mutually
+  exclusive states, so they share one tagged machine word; hot payload access
+  remains a direct pointer dereference and cold entries retain the provider
+  needed for lazy materialization;
+- the added `CChain` compact-id mirror is redundant because every pointed-to
+  `CBlockIndex` already carries its compact id. Compact-id accessors derive the
+  id from the canonical pointer vector instead of permanently duplicating four
+  bytes per active-chain height.
+
+On 64-bit builds these changes reduce the stable shell from 112 to 104 bytes
+without removing any upstream `CBlockIndex` identity/topology/chain-selection
+field. At roughly 24.3 million entries the one-word shell reduction is about
+186 MiB, and removing the active-chain id mirror saves another roughly 93 MiB.
+
+`nChainWork` is intentionally *not* moved out of the shell by this step.
+Although it is the largest single remaining field, it is Tier-0 state on
+candidate, peer, header-validation, mining and anti-DoS paths. A naive compact
+backing accessor would reintroduce synchronous mmap/storage faults under
+`cs_main`, violating the original compatibility/performance contract. A later
+chain-work compaction must first provide explicit resident pinning or another
+exact no-I/O representation for every live owner.
 
 ## Current object contents
 

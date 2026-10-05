@@ -4,6 +4,7 @@
 
 #include <node/blockindex_compact_lookup.h>
 
+#include <crypto/common.h>
 #include <crypto/siphash.h>
 #include <node/blockindex_compact_store.h>
 #include <random.h>
@@ -38,7 +39,7 @@ uint64_t NextPowerOfTwo(uint64_t value)
 uint64_t LookupCapacity(uint64_t entry_count)
 {
     // Keep load <= 75%. Current mainnet (~24.3M entries) therefore uses
-    // 2^25 slots, or 512 MiB at 16 bytes per slot.
+    // 2^25 slots, or 384 MiB at 12 bytes per slot.
     const uint64_t target{entry_count + (entry_count + 2) / 3};
     return NextPowerOfTwo(target);
 }
@@ -46,6 +47,52 @@ uint64_t LookupCapacity(uint64_t entry_count)
 uint64_t Fingerprint(uint64_t k0, uint64_t k1, const uint256& hash)
 {
     return SipHashUint256(k0, k1, hash);
+}
+
+BlockIndexId SlotId(const CompactBlockIndexLookupSlot& slot) noexcept
+{
+    return static_cast<BlockIndexId>(ReadLE32(slot.bytes.data() + 8));
+}
+
+uint64_t SlotFingerprint(const CompactBlockIndexLookupSlot& slot) noexcept
+{
+    return ReadLE64(slot.bytes.data());
+}
+
+void SetSlot(
+    CompactBlockIndexLookupSlot& slot,
+    uint64_t fingerprint,
+    BlockIndexId id) noexcept
+{
+    WriteLE64(slot.bytes.data(), fingerprint);
+    WriteLE32(slot.bytes.data() + 8, id);
+}
+
+void SetEmptySlot(CompactBlockIndexLookupSlot& slot) noexcept
+{
+    SetSlot(slot, 0, INVALID_BLOCK_INDEX_ID);
+}
+
+CompactBlockIndexResidentFingerprint ResidentFingerprint(uint64_t fingerprint) noexcept
+{
+    CompactBlockIndexResidentFingerprint out;
+    for (size_t i = 0; i < out.bytes.size(); ++i) {
+        out.bytes[i] = static_cast<unsigned char>(fingerprint >> (8 * i));
+    }
+    return out;
+}
+
+bool ResidentFingerprintMatches(
+    const CompactBlockIndexResidentFingerprint& resident,
+    uint64_t fingerprint) noexcept
+{
+    for (size_t i = 0; i < resident.bytes.size(); ++i) {
+        if (resident.bytes[i] !=
+            static_cast<unsigned char>(fingerprint >> (8 * i))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -130,7 +177,9 @@ bool CompactBlockIndexLookup::Build(
             auto* slots{reinterpret_cast<CompactBlockIndexLookupSlot*>(
                 base + sizeof(CompactBlockIndexLookupHeader))};
 
-            std::fill_n(slots, slot_count, CompactBlockIndexLookupSlot{});
+            for (uint64_t pos = 0; pos < slot_count; ++pos) {
+                SetEmptySlot(slots[pos]);
+            }
 
             const uint64_t mask{slot_count - 1};
             for (uint64_t raw_id = 0; raw_id < source.EntryCount(); ++raw_id) {
@@ -148,10 +197,8 @@ bool CompactBlockIndexLookup::Build(
                 bool inserted{false};
                 for (uint64_t probe = 0; probe < slot_count; ++probe) {
                     CompactBlockIndexLookupSlot& slot{slots[pos]};
-                    if (slot.id == INVALID_BLOCK_INDEX_ID) {
-                        slot.fingerprint = fp;
-                        slot.id = id;
-                        slot.reserved = 0;
+                    if (SlotId(slot) == INVALID_BLOCK_INDEX_ID) {
+                        SetSlot(slot, fp, id);
                         inserted = true;
                         break;
                     }
@@ -294,14 +341,15 @@ std::optional<BlockIndexId> CompactBlockIndexLookup::Find(
         if (probes) *probes = static_cast<uint32_t>(probe + 1);
 
         const CompactBlockIndexLookupSlot& slot{m_slots[pos]};
-        if (slot.id == INVALID_BLOCK_INDEX_ID) {
+        const BlockIndexId id{SlotId(slot)};
+        if (id == INVALID_BLOCK_INDEX_ID) {
             return std::nullopt;
         }
 
-        if (slot.fingerprint == fp) {
-            const CompactBlockIndexEntry* entry{source.Get(slot.id)};
+        if (SlotFingerprint(slot) == fp) {
+            const CompactBlockIndexEntry* entry{source.Get(id)};
             if (entry && entry->hash == hash) {
-                return slot.id;
+                return id;
             }
         }
 
@@ -329,9 +377,10 @@ bool CompactBlockIndexLookup::LoadResidentProbeFront(std::string& error)
 
         for (uint64_t pos = 0; pos < m_resident_slot_count; ++pos) {
             const CompactBlockIndexLookupSlot& slot{m_slots[pos]};
-            if (slot.id == INVALID_BLOCK_INDEX_ID) continue;
+            if (SlotId(slot) == INVALID_BLOCK_INDEX_ID) continue;
 
-            m_resident_fingerprints[pos] = slot.fingerprint;
+            m_resident_fingerprints[pos] =
+                ResidentFingerprint(SlotFingerprint(slot));
             m_resident_occupancy[pos >> 6] |= uint64_t{1} << (pos & 63);
         }
 
@@ -374,15 +423,17 @@ std::optional<BlockIndexId> CompactBlockIndexLookup::FindResident(
             return std::nullopt;
         }
 
-        if (m_resident_fingerprints[pos] == fp) {
+        if (ResidentFingerprintMatches(m_resident_fingerprints[pos], fp)) {
             // The id/full-hash backing is intentionally touched only after a
-            // keyed fingerprint match. For arbitrary remote misses this keeps
-            // the entire probe walk on the resident front.
+            // keyed 56-bit fingerprint match. For arbitrary remote misses this
+            // keeps the probe walk resident while an exact full-hash check
+            // still gates every positive result.
             if (touched_backing) *touched_backing = true;
             const CompactBlockIndexLookupSlot& slot{m_slots[pos]};
-            const CompactBlockIndexEntry* entry{source.Get(slot.id)};
+            const BlockIndexId id{SlotId(slot)};
+            const CompactBlockIndexEntry* entry{source.Get(id)};
             if (entry && entry->hash == hash) {
-                return slot.id;
+                return id;
             }
         }
 

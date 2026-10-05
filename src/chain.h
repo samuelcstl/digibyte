@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <limits>
 #include <vector>
 
@@ -227,48 +228,129 @@ public:
      * Generation-2 compact-store id.
      *
      * This is runtime identity metadata, not consensus state. Historical
-     * storage/merkle/time-max fields now live behind the residency payload,
-     * leaving the stable 64-bit shell at 112 bytes.
+     * storage/merkle/time-max fields now live behind the residency payload;
+     * shell-v2's tagged residency link leaves the stable 64-bit shell at
+     * 104 bytes.
      */
     uint32_t m_compact_id{std::numeric_limits<uint32_t>::max()};
 
     /**
-     * Residency-managed payload and provider. Store-managed indexes are backed
-     * by BlockIndexStore; standalone indexes own their payload directly.
+     * Residency-managed payload link.
+     *
+     * Generation 2 originally carried both a resident-payload pointer and a
+     * provider pointer in every CBlockIndex shell. Only one is needed at a
+     * time: a hot/resident entry points at its payload, while a cold entry
+     * points at the BlockIndexStore that can materialize it. Keep that state in
+     * one tagged machine word so the stable CBlockIndex* contract is unchanged
+     * while the 64-bit shell drops one pointer.
+     *
+     * Low two bits are tags. All participating objects have >=4-byte
+     * alignment:
+     *   00 non-zero: standalone-owned payload
+     *   01:          payload provider
+     *   10:          store/disk-owned borrowed payload
+     *   00 zero:     no payload/provider yet
      */
-    mutable BlockIndexResidentPayload* m_resident_payload{nullptr};
-    BlockIndexPayloadProvider* m_payload_provider{nullptr};
+    static constexpr uintptr_t PAYLOAD_LINK_TAG_MASK{uintptr_t{3}};
+    static constexpr uintptr_t PAYLOAD_LINK_PROVIDER{uintptr_t{1}};
+    static constexpr uintptr_t PAYLOAD_LINK_BORROWED{uintptr_t{2}};
+    mutable uintptr_t m_payload_link{0};
 
-    void SetPayloadProvider(BlockIndexPayloadProvider* provider) noexcept { m_payload_provider = provider; }
-    void AttachResidentPayload(BlockIndexResidentPayload* payload) const noexcept { m_resident_payload = payload; }
-    void ClearResidentPayload() const noexcept { m_resident_payload = nullptr; }
+    [[nodiscard]] uintptr_t PayloadLinkTag() const noexcept
+    {
+        return m_payload_link & PAYLOAD_LINK_TAG_MASK;
+    }
+
+    [[nodiscard]] BlockIndexResidentPayload* ResidentPayloadIfPresent() const noexcept
+    {
+        const uintptr_t tag{PayloadLinkTag()};
+        if (m_payload_link == 0 || tag == PAYLOAD_LINK_PROVIDER) return nullptr;
+        return reinterpret_cast<BlockIndexResidentPayload*>(
+            m_payload_link & ~PAYLOAD_LINK_TAG_MASK);
+    }
+
+    [[nodiscard]] BlockIndexPayloadProvider* PayloadProvider() const noexcept
+    {
+        if (PayloadLinkTag() != PAYLOAD_LINK_PROVIDER) return nullptr;
+        return reinterpret_cast<BlockIndexPayloadProvider*>(
+            m_payload_link & ~PAYLOAD_LINK_TAG_MASK);
+    }
+
+    [[nodiscard]] bool OwnsResidentPayload() const noexcept
+    {
+        return m_payload_link != 0 && PayloadLinkTag() == 0;
+    }
+
+    void SetPayloadProvider(BlockIndexPayloadProvider* provider) noexcept
+    {
+        assert(provider != nullptr);
+        const uintptr_t raw{reinterpret_cast<uintptr_t>(provider)};
+        assert((raw & PAYLOAD_LINK_TAG_MASK) == 0);
+        // Store-managed callers may replace a borrowed bootstrap/cache payload
+        // with its provider when the payload becomes cold. An owned standalone
+        // payload must be explicitly cleared/copied first.
+        assert(!OwnsResidentPayload());
+        m_payload_link = raw | PAYLOAD_LINK_PROVIDER;
+    }
+
+    void AttachResidentPayload(BlockIndexResidentPayload* payload) const noexcept
+    {
+        assert(payload != nullptr);
+        const uintptr_t raw{reinterpret_cast<uintptr_t>(payload)};
+        assert((raw & PAYLOAD_LINK_TAG_MASK) == 0);
+        m_payload_link = raw | PAYLOAD_LINK_BORROWED;
+    }
+
+    void AttachOwnedResidentPayload(BlockIndexResidentPayload* payload) const noexcept
+    {
+        assert(payload != nullptr);
+        const uintptr_t raw{reinterpret_cast<uintptr_t>(payload)};
+        assert((raw & PAYLOAD_LINK_TAG_MASK) == 0);
+        m_payload_link = raw;
+    }
+
+    void ClearResidentPayload() const noexcept
+    {
+        if (OwnsResidentPayload()) {
+            delete ResidentPayloadIfPresent();
+        }
+        m_payload_link = 0;
+    }
 
     [[nodiscard]] BlockIndexResidentPayload& ResidentPayload() const
     {
-        if (!m_resident_payload) {
-            if (m_payload_provider) {
-                m_resident_payload = &m_payload_provider->MaterializeBlockIndexPayload(
-                    *const_cast<CBlockIndex*>(this));
-            } else {
-                // Standalone/transient CBlockIndex objects used outside
-                // BlockIndexStore lazily own their payload. Store-managed
-                // entries install a provider before first payload access, so
-                // the production bootstrap path avoids per-entry heap churn.
-                m_resident_payload = new BlockIndexResidentPayload();
-            }
+        if (BlockIndexResidentPayload* payload{ResidentPayloadIfPresent()}) {
+            return *payload;
         }
-        return *m_resident_payload;
+        if (BlockIndexPayloadProvider* provider{PayloadProvider()}) {
+            return provider->MaterializeBlockIndexPayload(
+                *const_cast<CBlockIndex*>(this));
+        }
+
+        // Standalone/transient CBlockIndex objects used outside
+        // BlockIndexStore lazily own their payload. Store-managed entries
+        // install a tagged provider before first payload access.
+        auto* payload{new BlockIndexResidentPayload()};
+        AttachOwnedResidentPayload(payload);
+        return *payload;
     }
 
-    [[nodiscard]] bool HasResidentPayload() const noexcept { return m_resident_payload != nullptr; }
+    [[nodiscard]] bool HasResidentPayload() const noexcept
+    {
+        return ResidentPayloadIfPresent() != nullptr;
+    }
+
     [[nodiscard]] bool HasResidentAlgoHistory() const noexcept
     {
-        return m_resident_payload && m_resident_payload->algo_history;
+        const BlockIndexResidentPayload* payload{ResidentPayloadIfPresent()};
+        return payload && payload->algo_history;
     }
+
     [[nodiscard]] CBlockIndex* GetResidentLastAlgoBlock(int algo) const noexcept
     {
-        if (!HasResidentAlgoHistory() || algo < 0 || algo >= NUM_ALGOS_IMPL) return nullptr;
-        return m_resident_payload->algo_history->last_algo_blocks[algo];
+        const BlockIndexResidentPayload* payload{ResidentPayloadIfPresent()};
+        if (!payload || !payload->algo_history || algo < 0 || algo >= NUM_ALGOS_IMPL) return nullptr;
+        return payload->algo_history->last_algo_blocks[algo];
     }
 
     int& StorageFile() { return ResidentPayload().nFile; }
@@ -453,6 +535,9 @@ protected:
     CBlockIndex& operator=(CBlockIndex&&) = delete;
 };
 
+static_assert(sizeof(void*) != 8 || sizeof(CBlockIndex) == 104,
+              "64-bit CBlockIndex shell must remain 104 bytes");
+
 arith_uint256 GetBlockProof(const CBlockIndex& block);
 arith_uint256 GetBlockProof(const CBlockIndex& block, int algo);
 
@@ -484,25 +569,24 @@ public:
 
     CDiskBlockIndex()
     {
-        m_resident_payload = &m_disk_payload;
+        AttachResidentPayload(&m_disk_payload);
         hashPrev = uint256();
     }
 
     explicit CDiskBlockIndex(const CBlockIndex* pindex) : CBlockIndex(*pindex), m_has_persisted_chainwork{true}
     {
-        if (m_resident_payload) {
-            m_disk_payload = *m_resident_payload;
+        if (BlockIndexResidentPayload* payload{ResidentPayloadIfPresent()}) {
+            m_disk_payload = *payload;
             m_disk_payload.algo_history = nullptr;
-            delete m_resident_payload;
         }
-        m_resident_payload = &m_disk_payload;
-        m_payload_provider = nullptr;
+        ClearResidentPayload();
+        AttachResidentPayload(&m_disk_payload);
         hashPrev = (pprev ? pprev->GetBlockHash() : uint256());
     }
 
     ~CDiskBlockIndex()
     {
-        m_resident_payload = nullptr;
+        ClearResidentPayload();
     }
 
     bool HasPersistedChainWork() const { return m_has_persisted_chainwork; }
@@ -565,11 +649,6 @@ class CChain
 private:
     std::vector<CBlockIndex*> vChain;
 
-    // Generation-2 shadow of vChain. This deliberately coexists with the
-    // pointer vector while the remaining pointer owners are converted.
-    // UINT32_MAX means the pointed-to block does not yet have a compact id.
-    std::vector<uint32_t> vChainCompactIds;
-
 public:
     CChain() = default;
     CChain(const CChain&) = delete;
@@ -616,33 +695,40 @@ public:
         return int(vChain.size()) - 1;
     }
 
-    /** Generation-2 active-chain id mirror accessors. */
+    /**
+     * Generation-2 active-chain compact-id accessors.
+     *
+     * The stable upstream-compatible pointer vector remains canonical. Compact
+     * ids are already present in each CBlockIndex shell, so keeping a second
+     * uint32_t vector for every active-chain height duplicated ~4 bytes/block
+     * without adding information.
+     */
     uint32_t CompactIdAt(int nHeight) const
     {
-        if (nHeight < 0 || nHeight >= (int)vChainCompactIds.size())
-            return std::numeric_limits<uint32_t>::max();
-        return vChainCompactIds[nHeight];
+        const CBlockIndex* index{(*this)[nHeight]};
+        return index ? index->m_compact_id : std::numeric_limits<uint32_t>::max();
     }
 
-    size_t CompactIdCount() const { return vChainCompactIds.size(); }
+    size_t CompactIdCount() const { return vChain.size(); }
 
     bool CompactIdMirrorMatchesPointers() const
     {
-        if (vChainCompactIds.size() != vChain.size()) return false;
-        for (size_t i = 0; i < vChain.size(); ++i) {
-            const CBlockIndex* index{vChain[i]};
-            if (!index || vChainCompactIds[i] != index->m_compact_id) return false;
-        }
-        return true;
+        // Compatibility helper retained for existing callers/tests. There is
+        // no separate mirror anymore; the pointer-owned shell is authoritative.
+        return std::all_of(
+            vChain.begin(),
+            vChain.end(),
+            [](const CBlockIndex* index) { return index != nullptr; });
     }
 
     bool CompactIdsComplete() const
     {
         return std::all_of(
-            vChainCompactIds.begin(),
-            vChainCompactIds.end(),
-            [](uint32_t id) {
-                return id != std::numeric_limits<uint32_t>::max();
+            vChain.begin(),
+            vChain.end(),
+            [](const CBlockIndex* index) {
+                return index &&
+                       index->m_compact_id != std::numeric_limits<uint32_t>::max();
             });
     }
 

@@ -2035,9 +2035,26 @@ bool BlockManager::VerifyCompactBlockIndexLookup()
         std::string open_error;
         const fs::path path{CompactBlockIndexLookupPath()};
         if (!lookup->Open(path, *m_compact_block_index, open_error)) {
-            LogPrintf("Compact block index: cannot open lookup %s: %s\n",
+            // The lookup is a derived cache. Format upgrades, a stale source
+            // generation, or a missing file must not force a legacy
+            // whole-history bootstrap or operator intervention. Rebuild it
+            // directly from the authoritative compact source and retry.
+            LogPrintf("Compact block index: lookup unavailable/incompatible at %s: %s; rebuilding derived lookup\n",
                       fs::PathToString(path), open_error);
-            return false;
+            std::string build_error;
+            if (!CompactBlockIndexLookup::Build(
+                    path, *m_compact_block_index, build_error)) {
+                LogPrintf("Compact block index: lookup rebuild failed for %s: %s\n",
+                          fs::PathToString(path), build_error);
+                return false;
+            }
+            lookup = std::make_unique<CompactBlockIndexLookup>();
+            open_error.clear();
+            if (!lookup->Open(path, *m_compact_block_index, open_error)) {
+                LogPrintf("Compact block index: rebuilt lookup but could not reopen %s: %s\n",
+                          fs::PathToString(path), open_error);
+                return false;
+            }
         }
         m_compact_block_lookup = std::move(lookup);
     }

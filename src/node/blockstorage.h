@@ -618,8 +618,8 @@ public:
             dest.nSequenceId = source.nSequenceId;
             dest.m_compact_id = source.m_compact_id;
             dest.SetPayloadProvider(this);
-            if (source.m_resident_payload) {
-                dest.AttachResidentPayload(source.m_resident_payload);
+            if (BlockIndexResidentPayload* payload{source.ResidentPayloadIfPresent()}) {
+                dest.AttachResidentPayload(payload);
             }
 
             if (raw_id < immutable_count) {
@@ -749,7 +749,7 @@ public:
 
     BlockIndexResidentPayload& MaterializeBlockIndexPayload(CBlockIndex& index) override
     {
-        if (index.m_resident_payload) {
+        if (BlockIndexResidentPayload* resident{index.ResidentPayloadIfPresent()}) {
             const auto cached{m_payload_cache_index.find(&index)};
             if (cached != m_payload_cache_index.end()) {
                 m_payload_cache_lru.splice(
@@ -758,7 +758,7 @@ public:
                     cached->second);
             }
             ++m_stats.payload_cache_hits;
-            return *index.m_resident_payload;
+            return *resident;
         }
 
         ++m_stats.payload_cache_misses;
@@ -811,7 +811,7 @@ public:
 
         if (index.pprev && index.pprev->HasResidentAlgoHistory()) {
             history->last_algo_blocks =
-                index.pprev->m_resident_payload->algo_history->last_algo_blocks;
+                index.pprev->ResidentPayloadIfPresent()->algo_history->last_algo_blocks;
         } else {
             history->last_algo_blocks.fill(nullptr);
         }
@@ -927,8 +927,8 @@ public:
         hot.reserve(std::min<size_t>(m_hot_depth, static_cast<size_t>(tip->nHeight) + 1));
         for (CBlockIndex* index{tip}; index && hot.size() < m_hot_depth; index = index->pprev) {
             BlockIndexResidentPayload payload;
-            if (index->m_resident_payload) {
-                payload = *index->m_resident_payload;
+            if (BlockIndexResidentPayload* resident{index->ResidentPayloadIfPresent()}) {
+                payload = *resident;
             } else if (!m_payload_loader(*index, payload)) {
                 return false;
             }
@@ -936,7 +936,7 @@ public:
             hot.emplace_back(index, std::move(payload));
         }
 
-        ForEach([](CBlockIndex& index) { index.ClearResidentPayload(); });
+        ForEach([this](CBlockIndex& index) { index.SetPayloadProvider(this); });
         m_bootstrap_payloads.clear();
         m_payload_cache_lru.clear();
         m_payload_cache_index.clear();
@@ -1049,7 +1049,7 @@ private:
             if (victim == m_payload_cache_lru.end()) break;
 
             m_cached_algo_payloads.erase(victim->index);
-            victim->index->ClearResidentPayload();
+            victim->index->SetPayloadProvider(this);
             m_payload_cache_index.erase(victim->index);
             m_payload_cache_lru.erase(victim);
             ++m_stats.payload_cache_evictions;
