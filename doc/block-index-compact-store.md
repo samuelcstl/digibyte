@@ -276,8 +276,12 @@ compact store.
   against the legacy `unordered_map<uint256, CBlockIndex>`.
 - `-blockindexcompactlookup=verify` reopens and verifies an existing lookup.
 - The table uses power-of-two open addressing at no more than 75% load.
-  At roughly 24.3 million records this is 33,554,432 16-byte slots, exactly
-  536,871,040 bytes including the header.
+  Generation 2 lookup format version 2 stores an explicit 12-byte
+  little-endian slot (64-bit keyed fingerprint + 32-bit compact id), removing
+  the four unused padding bytes from the original local-ABI prototype. At
+  roughly 24.3 million records this is 33,554,432 slots, about 384 MiB plus
+  the small header. Version-1 lookup files are derived caches and are rebuilt
+  automatically from the compact source.
 - Each slot stores a keyed 64-bit SipHash fingerprint plus a 32-bit
   `BlockIndexId`. Fingerprint matches are always verified against the full
   authoritative 256-bit hash in the compact mapped record.
@@ -323,9 +327,13 @@ remains mandatory before returning a positive result. If the threat model
 requires still more margin, two independent keyed fingerprints can be
 evaluated against the extra resident-memory cost.
 
-A first resident-front prototype copies only keyed fingerprints plus an
-occupancy bitmap into anonymous memory. At the current 2^25-slot table this is
-272,629,760 bytes (about 260 MiB). The front loaded in about 260 ms.
+The resident-front implementation copies keyed fingerprints plus an occupancy
+bitmap into anonymous memory. Shell-v2 keeps 56 keyed fingerprint bits per
+slot rather than the full 64-bit on-disk value. At the current 2^25-slot table
+this is about 224 MiB plus a 4 MiB occupancy bitmap, while every candidate
+match is still verified against the full 64-bit lookup slot and authoritative
+256-bit block hash. The keyed 56-bit front keeps arbitrary miss traffic on a
+resident surface while saving one byte per slot.
 
 Measured immediately after lookup verification:
 
