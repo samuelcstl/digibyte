@@ -10,8 +10,10 @@
 >
 > The first real historical payload-cache cut-over is now implemented for
 > measurement: `nFile/nDataPos/nUndoPos`, `hashMerkleRoot` and `nTimeMax`
-> moved behind `BlockIndexStore`, reducing the 64-bit stable shell from 152
-> bytes to 112 bytes. `full` retains eager compatibility residency while
+> moved behind `BlockIndexStore`; shell-v2 then collapses the mutually
+> exclusive resident-payload/provider pointers into one tagged word, reducing
+> the 64-bit stable shell from 152 to 104 bytes. `full` retains eager
+> compatibility residency while
 > `balanced` and `lowmem` pin the active hot window and use a bounded
 > historical payload cache backed by the verified compact base plus live delta.
 > The missing `-blockindexcache=<MiB>` policy knob has been restored.
