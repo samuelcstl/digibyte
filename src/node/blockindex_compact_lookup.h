@@ -25,7 +25,7 @@ namespace node {
 
 class CompactBlockIndexStore;
 
-static constexpr uint32_t COMPACT_BLOCK_INDEX_LOOKUP_VERSION{1};
+static constexpr uint32_t COMPACT_BLOCK_INDEX_LOOKUP_VERSION{2};
 static constexpr std::array<unsigned char, 8> COMPACT_BLOCK_INDEX_LOOKUP_MAGIC{
     'D', 'G', 'B', 'C', 'B', 'L', '1', '\0'};
 
@@ -33,7 +33,7 @@ struct CompactBlockIndexLookupHeader
 {
     std::array<unsigned char, 8> magic{COMPACT_BLOCK_INDEX_LOOKUP_MAGIC};
     uint32_t version{COMPACT_BLOCK_INDEX_LOOKUP_VERSION};
-    uint32_t slot_size{16};
+    uint32_t slot_size{12};
     uint64_t slot_count{0};
     uint64_t entry_count{0};
     uint64_t source_generation{0};
@@ -48,12 +48,23 @@ static_assert(sizeof(CompactBlockIndexLookupHeader) == 128);
 
 struct CompactBlockIndexLookupSlot
 {
-    uint64_t fingerprint{0};
-    BlockIndexId id{INVALID_BLOCK_INDEX_ID};
-    uint32_t reserved{0};
+    // Explicit 12-byte little-endian storage: 64-bit keyed fingerprint +
+    // 32-bit compact id. This lookup is a rebuildable sidecar, so version 2
+    // intentionally drops the four unused padding bytes from every slot.
+    std::array<unsigned char, 12> bytes{};
 };
 
-static_assert(sizeof(CompactBlockIndexLookupSlot) == 16);
+static_assert(sizeof(CompactBlockIndexLookupSlot) == 12);
+
+struct CompactBlockIndexResidentFingerprint
+{
+    // The resident negative-lookup front needs no id. Keep 56 keyed bits,
+    // enough that even sustained remote miss traffic has a negligible chance
+    // of causing a false backing touch, while saving one byte per table slot.
+    std::array<unsigned char, 7> bytes{};
+};
+
+static_assert(sizeof(CompactBlockIndexResidentFingerprint) == 7);
 
 /**
  * Persistent open-addressing hash -> BlockIndexId table.
@@ -117,7 +128,8 @@ public:
 
     [[nodiscard]] uint64_t ResidentProbeFrontBytes() const noexcept
     {
-        return static_cast<uint64_t>(m_resident_fingerprints.size()) * sizeof(uint64_t) +
+        return static_cast<uint64_t>(m_resident_fingerprints.size()) *
+                   sizeof(CompactBlockIndexResidentFingerprint) +
                static_cast<uint64_t>(m_resident_occupancy.size()) * sizeof(uint64_t);
     }
 
@@ -137,7 +149,7 @@ private:
 
     // Anonymous resident negative-lookup surface. The exact id and full hash
     // remain file-backed and are touched only after a keyed fingerprint match.
-    std::vector<uint64_t> m_resident_fingerprints;
+    std::vector<CompactBlockIndexResidentFingerprint> m_resident_fingerprints;
     std::vector<uint64_t> m_resident_occupancy;
     uint64_t m_resident_slot_count{0};
     uint64_t m_resident_mask{0};
