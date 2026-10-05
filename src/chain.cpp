@@ -32,14 +32,14 @@ CBlockIndex::CBlockIndex(const CBlockIndex& other)
       nSequenceId(other.nSequenceId),
       m_compact_id(other.m_compact_id)
 {
-    if (other.m_resident_payload || other.m_payload_provider) {
-        m_resident_payload = new BlockIndexResidentPayload(other.ResidentPayload());
+    if (other.HasResidentPayload() || other.PayloadProvider()) {
+        AttachOwnedResidentPayload(new BlockIndexResidentPayload(other.ResidentPayload()));
     }
 }
 
 CBlockIndex::~CBlockIndex()
 {
-    if (!m_payload_provider) delete m_resident_payload;
+    ClearResidentPayload();
 }
 
 CBlockIndex::CBlockIndex(const CBlockHeader& block)
@@ -48,8 +48,9 @@ CBlockIndex::CBlockIndex(const CBlockHeader& block)
       nBits(block.nBits),
       nNonce(block.nNonce)
 {
-    m_resident_payload = new BlockIndexResidentPayload();
-    m_resident_payload->hashMerkleRoot = block.hashMerkleRoot;
+    auto* payload{new BlockIndexResidentPayload()};
+    payload->hashMerkleRoot = block.hashMerkleRoot;
+    AttachOwnedResidentPayload(payload);
 }
 std::string CBlockFileInfo::ToString() const
 {
@@ -65,15 +66,9 @@ std::string CBlockIndex::ToString() const
 void CChain::SetTip(CBlockIndex& block) {
     CBlockIndex* pindex = &block;
     vChain.resize(pindex->nHeight + 1);
-    vChainCompactIds.resize(
-        pindex->nHeight + 1,
-        std::numeric_limits<uint32_t>::max());
 
-    while (pindex &&
-           (vChain[pindex->nHeight] != pindex ||
-            vChainCompactIds[pindex->nHeight] != pindex->m_compact_id)) {
+    while (pindex && vChain[pindex->nHeight] != pindex) {
         vChain[pindex->nHeight] = pindex;
-        vChainCompactIds[pindex->nHeight] = pindex->m_compact_id;
         pindex = pindex->pprev;
     }
 }
