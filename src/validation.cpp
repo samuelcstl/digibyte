@@ -5732,27 +5732,47 @@ bool ChainstateManager::LoadBlockIndex()
                       vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - collect_start));
         }
 
-        // The active chain tip is not known yet, so populating
-        // setBlockIndexCandidates here would temporarily insert essentially
-        // every transaction-valid historical block. On DigiByte's 24M+ block
-        // history that creates more than a gigabyte of short-lived std::set
-        // nodes whose allocator pages can remain resident after pruning.
+        // On a fresh process startup the chainstate tip is not known yet, so
+        // populating setBlockIndexCandidates here would temporarily insert
+        // essentially every transaction-valid historical block. On DigiByte's
+        // 24M+ block history that creates more than a gigabyte of short-lived
+        // std::set nodes whose allocator pages can remain resident after pruning.
         //
-        // Candidate population is deferred until LoadChainTip(), where the
-        // persisted chainstate tip is known and TryAddBlockIndexCandidate() can
-        // reject historical entries before allocating set nodes. Keep this pass
-        // for the global best-invalid and best-header state.
+        // Defer candidate population until LoadChainTip() for chainstates whose
+        // tip is still null. If LoadBlockIndex() is called on an already-live
+        // chainstate (notably unit-test/reload paths), preserve its historical
+        // contract by rebuilding candidates immediately: TryAddBlockIndexCandidate()
+        // can filter against the already-known tip before allocating set nodes.
+        std::vector<Chainstate*> candidate_chainstates;
+        for (Chainstate* chainstate : GetAll()) {
+            if (chainstate->m_chain.Tip() != nullptr) {
+                candidate_chainstates.push_back(chainstate);
+            }
+        }
+
         const auto header_start{SteadyClock::now()};
         for (CBlockIndex* pindex : vSortedByHeight) {
             if (m_interrupt) return false;
+
+            if (!candidate_chainstates.empty() &&
+                    (pindex == GetSnapshotBaseBlock() ||
+                     (pindex->IsValid(BLOCK_VALID_TRANSACTIONS) &&
+                      (pindex->HaveNumChainTxs() || pindex->pprev == nullptr)))) {
+                for (Chainstate* chainstate : candidate_chainstates) {
+                    chainstate->TryAddBlockIndexCandidate(pindex);
+                }
+            }
+
             if (pindex->nStatus & BLOCK_FAILED_MASK && (!m_best_invalid || pindex->nChainWork > m_best_invalid->nChainWork)) {
                 m_best_invalid = pindex;
             }
             if (pindex->IsValid(BLOCK_VALID_TREE) && (m_best_header == nullptr || CBlockIndexWorkComparator()(m_best_header, pindex)))
                 m_best_header = pindex;
         }
-        LogPrintf("Startup timing: block-index header pass: %d entries in %d ms\n",
-                  vSortedByHeight.size(), Ticks<std::chrono::milliseconds>(SteadyClock::now() - header_start));
+        LogPrintf("Startup timing: block-index header pass: %d entries candidate_chainstates=%u in %d ms\n",
+                  vSortedByHeight.size(),
+                  candidate_chainstates.size(),
+                  Ticks<std::chrono::milliseconds>(SteadyClock::now() - header_start));
 
         needs_init = m_blockman.m_block_index.empty();
     }
